@@ -323,6 +323,23 @@ def init_database() -> None:
 
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS attendance_device_locks (
+                    id BIGSERIAL PRIMARY KEY,
+                    session_id BIGINT NOT NULL
+                        REFERENCES attendance_sessions(id)
+                        ON DELETE CASCADE,
+                    device_id TEXT NOT NULL,
+                    sno VARCHAR(10) NOT NULL
+                        REFERENCES students(sno)
+                        ON DELETE CASCADE,
+                    marked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(session_id, device_id)
+                )
+                """
+            )
+
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS verification_codes (
                     id BIGSERIAL PRIMARY KEY,
                     user_type VARCHAR(20) NOT NULL,
@@ -800,6 +817,7 @@ def get_my_code(sno: str):
 class MarkAttendanceRequest(BaseModel):
     sno: str
     code: str
+    device_id: str = Field(min_length=8, max_length=200)
     latitude: Optional[float] = Field(default=None)
     longitude: Optional[float] = Field(default=None)
 
@@ -848,6 +866,38 @@ def mark_attendance(request: MarkAttendanceRequest):
                 raise HTTPException(
                     status_code=401,
                     detail="Invalid attendance code.",
+                )
+
+            # One app installation/device can mark only one student's
+            # attendance during this attendance session.
+            device_id = request.device_id.strip()
+            if not device_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Device identification is required.",
+                )
+
+            cur.execute(
+                """
+                SELECT sno
+                FROM attendance_device_locks
+                WHERE session_id = %s
+                  AND device_id = %s
+                FOR UPDATE
+                """,
+                (session["id"], device_id),
+            )
+            existing_device_lock = cur.fetchone()
+
+            if existing_device_lock:
+                if existing_device_lock["sno"] == sno:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Attendance is already marked from this device for this session.",
+                    )
+                raise HTTPException(
+                    status_code=409,
+                    detail="This device has already been used to mark attendance for this session.",
                 )
 
             # Duplicate prevention.
@@ -942,6 +992,25 @@ def mark_attendance(request: MarkAttendanceRequest):
                     request.latitude,
                     request.longitude,
                     distance,
+                ),
+            )
+
+            cur.execute(
+                """
+                INSERT INTO attendance_device_locks
+                (
+                    session_id,
+                    device_id,
+                    sno,
+                    marked_at
+                )
+                VALUES (%s, %s, %s, %s)
+                """,
+                (
+                    session["id"],
+                    device_id,
+                    sno,
+                    marked_at,
                 ),
             )
 
@@ -1445,7 +1514,7 @@ def development_reset_database():
             cur.execute(
                 "TRUNCATE attendance_records, "
                 "attendance_codes, attendance_sessions, "
-                "student_passwords, verification_codes "
+                "attendance_device_locks, student_passwords, verification_codes "
                 "RESTART IDENTITY CASCADE"
             )
 
