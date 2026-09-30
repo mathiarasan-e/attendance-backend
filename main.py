@@ -24,9 +24,9 @@ import os
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-CODE_VALIDITY_MINUTES = 1
+CODE_VALIDITY_MINUTES = 15
 ABSENTEE_VISIBILITY_MINUTES = 45
-MAX_ATTENDANCE_DISTANCE_METERS = 20.0
+MAX_ATTENDANCE_DISTANCE_METERS = 30.0
 
 # Keep False while we are testing the backend before the
 # classroom GPS coordinates are configured.
@@ -35,8 +35,8 @@ LOCATION_REQUIRED = True
 
 # Put the actual classroom coordinates here before enabling
 # LOCATION_REQUIRED.
-CLASSROOM_LATITUDE = 12.9868169
-CLASSROOM_LONGITUDE = 79.9724955
+CLASSROOM_LATITUDE = 12.9869153
+CLASSROOM_LONGITUDE = 79.9724422
 
 
 # ============================================================
@@ -274,8 +274,8 @@ def init_database() -> None:
             cur.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS
-                one_active_attendance_session
-                ON attendance_sessions (active)
+                one_active_attendance_session_per_subject
+                ON attendance_sessions (subject)
                 WHERE active = TRUE
                 """
             )
@@ -613,7 +613,7 @@ def start_attendance(
 
     # Finalize an expired session before starting another one.
     # This is intentionally done before the transaction below so an old
-    # 1-minute session can never block the next Generate Code operation.
+    # 15-minute session can never block the next Generate Code operation.
     close_expired_sessions()
 
     current = now_utc()
@@ -972,7 +972,7 @@ def get_absentees(
             detail="Subject not found.",
         )
 
-    # If the 1-minute session has ended, finalize absent records
+    # If the 15-minute session has ended, finalize absent records
     # before calculating the list.
     close_expired_sessions()
 
