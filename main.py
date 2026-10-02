@@ -10,6 +10,7 @@ from typing import Optional
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from pydantic import BaseModel, Field
@@ -218,6 +219,16 @@ SUBJECT_PASSWORDS: dict[str, str] = {
 app = FastAPI(
     title="College Attendance Backend",
     version="2.0.0",
+)
+
+# Allow the Flutter Web frontend to call this backend from a browser.
+# Android/iOS clients are unaffected by this middleware.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
