@@ -26,8 +26,8 @@ import os
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 CODE_VALIDITY_MINUTES = 15
-ABSENTEE_VISIBILITY_MINUTES = 45
-MAX_ATTENDANCE_DISTANCE_METERS = 30.0
+ABSENTEE_VISIBILITY_MINUTES = 35
+MAX_ATTENDANCE_DISTANCE_METERS = 40.0
 
 # Keep False while we are testing the backend before the
 # classroom GPS coordinates are configured.
@@ -202,17 +202,17 @@ SUBJECTS: dict[str, str] = {
 # This is a temporary placeholder and MUST be changed before
 # real deployment.
 SUBJECT_PASSWORDS: dict[str, str] = {
-    "Tamil": "Staff@tamil",
-    "Communicative English": "Staff@english",
-    "Algebra and Calculus": "Staff@maths",
-    "Applied Chemistry": "Staff@chemistry",
-    "Computer Programming 1": "Staff@cs",
-    "CAD Based Engineering graphics": "Staff@eg",
-    "Computer Programming laboratory I": "Staff@cs",
-    "Makerspace": "Staff@makerspace",
-    "Seminar 1": "Staff@seminar",
-    "Seminar 2": "Staff@cs",
-    "Seminar 3": "Staff@seminar",
+    "Tamil": "Staff@tamil26",
+    "Communicative English": "Staff@english26",
+    "Algebra and Calculus": "Staff@maths26",
+    "Applied Chemistry": "Staff@chemistry26",
+    "Computer Programming 1": "Staff@cs26",
+    "CAD Based Engineering graphics": "Staff@eg26",
+    "Computer Programming laboratory I": "Staff@cs26",
+    "Makerspace": "Staff@makerspace26",
+    "Seminar 1": "Staff@seminar26",
+    "Seminar 2": "Staff@cs26",
+    "Seminar 3": "Staff@seminar26",
 }
 
 
