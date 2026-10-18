@@ -2,3 +2,18 @@ venv/
 __pycache__/
 *.pyc
 .env
+# Local overrides (for example a Neon dev branch) - never committed.
+.env.local
+.env.*.local
+
+# Zoho Catalyst CLI
+.catalystrc
+catalyst-debug.log
+
+# Holds the deployed service's environment variables, including DATABASE_URL.
+# Regenerate with `catalyst appsail:add` (see README) rather than committing it.
+app-config.json
+
+# Vendored Linux dependencies for the AppSail managed runtime
+build/
+.neon

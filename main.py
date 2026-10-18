@@ -9,16 +9,18 @@ import secrets
 import smtplib
 import ssl
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from io import BytesIO
+from pathlib import Path
 from typing import Optional
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from pydantic import BaseModel, Field
 
@@ -30,6 +32,56 @@ except Exception:  # pragma: no cover
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("attendance")
+
+
+def _read_env_file(path: str) -> dict:
+    """Parse simple KEY=VALUE pairs from a local .env file.
+
+    Written by hand to avoid adding a dependency to the AppSail bundle for a
+    few lines of parsing. Returns an empty mapping when the file is absent.
+    """
+    values: dict = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return values
+
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        # Strip the surrounding quotes that `neon link` writes.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+def _load_env_files(*paths: str) -> None:
+    """Apply local .env files without ever overriding the real environment.
+
+    Later files win over earlier ones, so .env.local overrides .env. Anything
+    already set in the process environment beats all of them, which keeps a
+    deployed container authoritative and lets a one-off command such as
+    `$env:DATABASE_URL=...; python reset_staff_passwords.py` win locally.
+    """
+    real_env = set(os.environ)
+    merged: dict = {}
+    for path in paths:
+        merged.update(_read_env_file(path))
+
+    for key, value in merged.items():
+        if key not in real_env:
+            os.environ[key] = value
+
+
+# .env carries the configuration the deployed service runs with. .env.local
+# overrides it for local development (typically pointing DATABASE_URL at a Neon
+# dev branch) and is never committed.
+_load_env_files(".env", ".env.local")
 
 
 # ============================================================
@@ -84,6 +136,17 @@ ALLOWED_ORIGINS = [
     for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",")
     if origin.strip()
 ]
+
+# Compiled Flutter web app. build_appsail.ps1 copies it into build/web, so it
+# exists in the deployed bundle and is absent during local development.
+# Serving the UI from the same origin as the API avoids CORS altogether.
+# WEB_DIR overrides the location, which is handy for local testing.
+_web_dir_env = os.getenv("WEB_DIR", "").strip()
+WEB_DIR = (
+    Path(_web_dir_env)
+    if _web_dir_env
+    else Path(__file__).resolve().parent / "web"
+)
 
 PBKDF2_ITERATIONS = int(os.getenv("PBKDF2_ITERATIONS", "200000"))
 
@@ -257,7 +320,36 @@ SUBJECTS: dict[str, str] = {
 # APP
 # ============================================================
 
-app = FastAPI(title="College Attendance Backend", version="3.0.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Startup and shutdown wiring.
+
+    Replaces the deprecated ``on_event`` hooks. ``init_database`` and ``_pool``
+    are defined further down: they only need to exist by the time the app
+    actually starts serving requests, which is well after this module is
+    imported.
+    """
+    global _pool
+
+    if DATABASE_URL:
+        init_database()
+    else:
+        log.error("DATABASE_URL is not set. Database calls will fail.")
+
+    try:
+        yield
+    finally:
+        # Release pooled connections so the app shuts down cleanly.
+        if _pool is not None:
+            _pool.close()
+            _pool = None
+
+
+app = FastAPI(
+    title="College Attendance Backend",
+    version="3.0.0",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -517,14 +609,6 @@ def init_database() -> None:
                 )
 
         conn.commit()
-
-
-@app.on_event("startup")
-def startup_event() -> None:
-    if not DATABASE_URL:
-        log.error("DATABASE_URL is not set. Database calls will fail.")
-        return
-    init_database()
 
 
 # ============================================================
@@ -799,8 +883,7 @@ def get_latest_session_for_subject(subject: str):
 # ============================================================
 
 
-@app.get("/")
-def root():
+def _build_info() -> dict:
     return {
         "message": "College Attendance Backend is running",
         "students": len(STUDENTS),
@@ -811,6 +894,22 @@ def root():
         "semester_end": SEMESTER_END,
         "erp_mode": ERP_MODE,
     }
+
+
+@app.get("/api/info")
+def api_info():
+    return _build_info()
+
+
+@app.get("/")
+def root():
+    # In the deployed bundle this origin also serves the Flutter app, so "/"
+    # returns the UI. Locally, where no web build has been copied in, it falls
+    # back to the service summary so the endpoint stays useful for smoke tests.
+    index = WEB_DIR / "index.html"
+    if index.is_file():
+        return FileResponse(index)
+    return _build_info()
 
 
 @app.get("/health")
@@ -2135,3 +2234,37 @@ def development_reset_database():
         conn.commit()
 
     return {"success": True, "message": "Development attendance data reset."}
+
+
+# ============================================================
+# STATIC FLUTTER WEB APP
+# ============================================================
+#
+# Mounted last so every API route above keeps priority. Serving the UI and the
+# API from one origin removes cross-origin requests entirely, which matters
+# because the Catalyst gateway answers CORS preflights itself and never passes
+# them through to this app.
+
+if (WEB_DIR / "index.html").is_file():
+    app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
+    log.info("Serving the Flutter web app from %s", WEB_DIR)
+else:
+    log.info("No Flutter web build at %s - serving the API only", WEB_DIR)
+
+
+# ============================================================
+# DIRECT EXECUTION (used by Zoho Catalyst AppSail)
+# ============================================================
+
+if __name__ == "__main__":
+    # AppSail starts the service with a plain command and tells us which port
+    # to bind through X_ZOHO_CATALYST_LISTEN_PORT. Handling that here avoids
+    # having to interpolate the variable inside a shell-wrapped startup
+    # command, which is easy to get wrong and awkward to debug.
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("X_ZOHO_CATALYST_LISTEN_PORT", "9000")),
+    )

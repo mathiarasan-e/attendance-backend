@@ -1,5 +1,8 @@
 fastapi
-uvicorn[standard]
+# Plain uvicorn, not uvicorn[standard]: the managed Python runtime needs
+# Linux wheels for every compiled package, and the "standard" extras
+# (uvloop, httptools, watchfiles) add avoidable compiled dependencies.
+uvicorn
 psycopg[binary]
 psycopg_pool
 openpyxl

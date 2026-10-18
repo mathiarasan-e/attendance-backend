@@ -24,6 +24,8 @@ FastAPI + PostgreSQL service for the college attendance app.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| GET | `/` | The Flutter web app (falls back to the info JSON locally) |
+| GET | `/api/info` | Service summary: students, subjects, radius, ERP mode |
 | GET | `/health` | Service + database check |
 | GET | `/subjects` | Subject and staff list |
 | POST | `/staff/verify-subject` | Staff login (subject + password) |
@@ -44,6 +46,22 @@ FastAPI + PostgreSQL service for the college attendance app.
 | GET | `/attendance/export` | Download the summary as `.xlsx` |
 | POST | `/attendance/erp-update` | Generate + deliver the summary to the ERP |
 
+## Serving the web app
+
+AppSail serves the compiled Flutter app **and** the API from one origin: `GET /`
+returns the UI, and every API path above keeps priority over it. The browser
+therefore never makes a cross-origin request.
+
+That matters here. The Catalyst gateway answers CORS preflights itself and does
+not pass them through to this app, so it returns `200` with no
+`Access-Control-Allow-*` headers. A browser would reject that and block every
+JSON `POST` — login, start session, mark attendance, ERP update — from a
+different origin. Same-origin serving sidesteps it entirely.
+
+`build_appsail.ps1` copies the Flutter build into `build/web`. `WEB_DIR`
+overrides the location, which is useful for local runs. When no build is present
+the API still works and `GET /` returns the summary JSON instead.
+
 ## Configuration
 
 Copy `.env.example` and fill in the values, or set them in the Catalyst AppSail
@@ -57,7 +75,8 @@ environment. Everything has a safe default except `DATABASE_URL`.
 | `LOCATION_REQUIRED` | Require GPS coordinates (default true) |
 | `CLASSROOM_LATITUDE` / `CLASSROOM_LONGITUDE` | Classroom location |
 | `SEMESTER_START` / `SEMESTER_END` | Reporting window (informational) |
-| `ALLOWED_ORIGINS` | Comma-separated web origins (default `*`) |
+| `ALLOWED_ORIGINS` | Comma-separated web origins (default `*`; unused when the UI is served from this origin) |
+| `WEB_DIR` | Directory of the compiled Flutter app (default `./web`) |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` | Outbound mail (Catalyst Mail) |
 | `ERP_MODE` | `file` (email the Excel) or `api` (POST to an endpoint) |
 | `ERP_UPLOAD_EMAIL` | Where the ERP summary is emailed |
@@ -79,24 +98,95 @@ WARNING:attendance:[staff-init] Ms. S. Saranya initial password: Svce@67fa3e (mu
 Collect those from the AppSail logs and hand them out. Each staff member is
 asked to set their own password the first time they sign in.
 
-## Local development
+If those lines have already rolled off the console logs, reset them:
 
-```bash
-python -m venv venv
-venv\Scripts\pip install -r requirements.txt
-# set DATABASE_URL in .env, then
-venv\Scripts\uvicorn main:app --reload --port 8000
+```powershell
+venv\Scripts\python reset_staff_passwords.py            # prints the host, asks to confirm
+venv\Scripts\python reset_staff_passwords.py --yes
+venv\Scripts\python reset_staff_passwords.py --staff "Ms. S. Saranya"
 ```
 
-## Deploy to Zoho Catalyst (AppSail + Docker)
+It reuses the app's own hashing, so the result is identical to the original
+seeding, and it resolves the database the same way the app does (`.env`, then
+`.env.local`). Check the host it prints before confirming.
 
-1. Create a Neon Postgres database and copy its connection string.
-2. Create a Catalyst AppSail service from this repository; it builds `Dockerfile`.
-3. Set the environment variables above (at minimum `DATABASE_URL`).
-4. AppSail passes the port through `X_ZOHO_CATALYST_LISTEN_PORT`; the
-   `Dockerfile` already binds to it on `0.0.0.0`.
-5. After the first boot, read the staff passwords from the logs.
-6. Health check: `GET /health` should return `{"status":"ok"}`.
+## Local development
+
+`.env` is loaded automatically at startup, then `.env.local` is loaded on top of
+it and takes precedence. Real environment variables override both, so a
+deployed container's configuration is never overridden by a stray file.
+
+Keep the shared configuration in `.env` and machine-specific overrides (for
+example a Neon **dev** branch) in `.env.local`, which is git-ignored. Pointing
+`.env` at production means local testing writes real attendance data.
+
+```powershell
+python -m venv venv
+venv\Scripts\pip install -r requirements.txt
+
+# .env.local, for example:
+#   DATABASE_URL=<pooled dev branch connection string>
+# Optional: serve the real UI. Relative paths resolve from this directory.
+$env:WEB_DIR = "..\attendance_app\build\web"
+
+venv\Scripts\python main.py
+```
+
+`python main.py` binds `0.0.0.0` on `X_ZOHO_CATALYST_LISTEN_PORT` (default
+`9000`), the same path AppSail uses, so it is the closest thing to production.
+For autoreload use `venv\Scripts\uvicorn main:app --reload --port 8000`.
+
+## Database (Neon)
+
+`DATABASE_URL` takes a Neon connection string. Use the **pooled** one (the host
+contains `-pooler`) for application traffic, because the app keeps a small
+connection pool; use the direct string for migrations and `pg_dump`.
+`neon link` writes both into `.env` as `DATABASE_URL` and
+`DATABASE_URL_UNPOOLED`.
+
+## Deploy to Zoho Catalyst AppSail (managed Python runtime)
+
+AppSail does **not** run `pip install` for managed runtimes, and it runs Linux,
+so every dependency must be vendored into the build folder as a Linux wheel.
+`build_appsail.ps1` does that, pinned to the Python 3.12 wheels that match the
+`python_3_12` stack:
+
+```powershell
+# 1. Compile the web UI (run in the attendance_app repo). The API base URL must
+#    match the AppSail origin the UI will be served from.
+flutter build web --release --dart-define=API_BASE_URL=https://<appsail-url>
+
+# 2. Vendor the Linux dependencies and bundle the UI
+.\build_appsail.ps1     # produces build/ = main.py + Linux wheels + web/
+```
+
+Without step 1 the script still works and deploys the API alone.
+
+Then register and deploy the service:
+
+```bash
+catalyst appsail:add -ni --name attendance-api --stack python_3_12 \
+  --source "<repo dir>" --build build --command "python3 main.py"
+catalyst deploy -ni --only appsail
+```
+
+`main.py` has a `__main__` block that binds to `0.0.0.0` on
+`X_ZOHO_CATALYST_LISTEN_PORT`, so the startup command stays a plain command
+with no shell quoting or variable interpolation to get wrong.
+
+Set the environment variables above (at minimum `DATABASE_URL`) in the AppSail
+service configuration. After the first boot, collect the staff passwords from
+the logs, then confirm `GET /health` returns
+`{"status":"ok","database":"connected"}`.
+
+`app-config.json` carries the service's environment variables, so it is
+git-ignored: it holds the database password. `catalyst appsail:add`
+regenerates it. The same variables can be managed in the Catalyst console
+instead, which is the better home for secrets on a shared machine.
+
+`Dockerfile` is kept for a possible future container-based deployment; the
+managed runtime path above does not use it.
+
 
 ## ERP integration
 
