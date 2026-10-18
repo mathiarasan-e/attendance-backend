@@ -1,4 +1,5 @@
 fastapi
 uvicorn[standard]
-psycopg
+psycopg[binary]
+psycopg_pool
 openpyxl

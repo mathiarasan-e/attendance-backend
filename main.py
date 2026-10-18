@@ -1,3102 +1,1915 @@
 from __future__ import annotations
 
-
-
 import hashlib
-
+import logging
 import math
-
+import os
 import re
-
 import secrets
-
+import smtplib
+import ssl
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-
+from email.message import EmailMessage
 from io import BytesIO
-
 from typing import Optional
 
-
-
 import psycopg
-
 from fastapi import FastAPI, HTTPException, Query
-
 from fastapi.middleware.cors import CORSMiddleware
-
 from fastapi.responses import StreamingResponse
-
 from openpyxl import Workbook
-
 from pydantic import BaseModel, Field
 
-import os
+try:  # psycopg_pool is optional; the app falls back to direct connections.
+    from psycopg_pool import ConnectionPool
+except Exception:  # pragma: no cover
+    ConnectionPool = None
 
 
-
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("attendance")
 
 
 # ============================================================
-
-# DATABASE / APP CONFIG
-
+# CONFIGURATION (all values come from environment variables)
 # ============================================================
-
-
-
-# CHANGE ONLY YOUR POSTGRESQL PASSWORD.
-
-
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+CODE_VALIDITY_MINUTES = int(os.getenv("CODE_VALIDITY_MINUTES", "15"))
 
+# How far a student may be from the classroom and still mark attendance.
+# Widened from 60 m because browser geolocation is less precise than native.
+MAX_ATTENDANCE_DISTANCE_METERS = float(
+    os.getenv("MAX_ATTENDANCE_DISTANCE_METERS", "120")
+)
 
-CODE_VALIDITY_MINUTES = 15
+LOCATION_REQUIRED = os.getenv("LOCATION_REQUIRED", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
-ABSENTEE_VISIBILITY_MINUTES = 35
+CLASSROOM_LATITUDE = float(os.getenv("CLASSROOM_LATITUDE", "12.9869153"))
+CLASSROOM_LONGITUDE = float(os.getenv("CLASSROOM_LONGITUDE", "79.9724422"))
 
-MAX_ATTENDANCE_DISTANCE_METERS = 60.0
+# Semester window (used only for the export header / reporting defaults).
+SEMESTER_START = os.getenv("SEMESTER_START")
+SEMESTER_END = os.getenv("SEMESTER_END")
 
+# ERP delivery. mode = "file" (download + email) or "api" (push to ERP endpoint).
+ERP_MODE = os.getenv("ERP_MODE", "file").lower()
+ERP_UPLOAD_EMAIL = os.getenv("ERP_UPLOAD_EMAIL")
+ERP_API_URL = os.getenv("ERP_API_URL")
+ERP_API_KEY = os.getenv("ERP_API_KEY")
 
+# Outbound mail (Catalyst Mail / any SMTP provider).
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_FROM = os.getenv("SMTP_FROM") or SMTP_USER
 
-# Keep False while we are testing the backend before the
+# The destructive reset endpoint is disabled unless explicitly enabled.
+RESET_DB_ENABLED = os.getenv("RESET_DB_ENABLED", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
-# classroom GPS coordinates are configured.
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",")
+    if origin.strip()
+]
 
-# Change to True after Flutter sends GPS coordinates.
+PBKDF2_ITERATIONS = int(os.getenv("PBKDF2_ITERATIONS", "200000"))
 
-LOCATION_REQUIRED = True
+VERIFICATION_CODE_MINUTES = int(os.getenv("VERIFICATION_CODE_MINUTES", "10"))
+VERIFICATION_RESEND_SECONDS = int(os.getenv("VERIFICATION_RESEND_SECONDS", "60"))
 
+MIN_PASSWORD_LENGTH = 4
 
-
-# Put the actual classroom coordinates here before enabling
-
-# LOCATION_REQUIRED.
-
-CLASSROOM_LATITUDE = 12.9869153
-
-CLASSROOM_LONGITUDE = 79.9724422
-
-
-
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 # ============================================================
-
 # STUDENTS
-
 # ============================================================
-
-
 
 STUDENTS: dict[str, str] = {
-
-    "120": 'JOAN MARSALINE A',
-
-    "121": 'JOEL S',
-
-    "122": 'K DEVADHARSHINI',
-
-    "123": 'K DHANANJAY',
-
-    "124": 'K M LEKHAA VARSHINI',
-
-    "125": 'K R HARSHINI',
-
-    "126": 'K SHAMITHA',
-
-    "127": 'KAILASH SURYA P',
-
-    "128": 'KAMALA KANNAN S',
-
-    "129": 'KAMALI S B',
-
-    "130": 'KANISHKA A',
-
-    "131": 'KAPILVENKAT K',
-
-    "132": 'KARTHICK S',
-
-    "133": 'KARTHIGA D',
-
-    "134": 'KARTHIGA S',
-
-    "135": 'KARUNYA G',
-
-    "136": 'KAVINAYA J',
-
-    "137": 'KAVIYA G',
-
-    "138": 'KAVIYA J',
-
-    "139": 'KEERTHANA R',
-
-    "140": 'KEERTHANA S',
-
-    "141": 'KESAVARAM P',
-
-    "142": 'KIRUPANITHI S',
-
-    "143": 'KISHORE K',
-
-    "144": 'KRISHITHA J',
-
-    "145": 'KRISHNA A M',
-
-    "146": 'KRITHICK S',
-
-    "147": 'LAKSHAYA G',
-
-    "148": 'LAKSHAYA NAGARAJAN',
-
-    "149": 'LAKSHIKHAA SRI B',
-
-    "150": 'LAKSHMAN M',
-
-    "151": 'LAKSHMI PRIYA S',
-
-    "152": 'LALITH CHANDAR M',
-
-    "153": 'LAURA SUSAN C',
-
-    "154": 'LAVANYA R',
-
-    "155": 'LIVISHARAN E',
-
-    "156": 'LOKESH D',
-
-    "157": 'LOKESHWARI V',
-
-    "158": 'M GUNADHARSHINI',
-
-    "159": 'M S ABISHIEK',
-
-    "160": 'M YASHWANTH SAI',
-
-    "161": 'MADHAN RAJ D',
-
-    "162": 'MALIK KANI M K',
-
-    "163": 'MANASA S',
-
-    "164": 'MANSI R',
-
-    "165": 'MATHANGI P',
-
-    "166": 'MATHAVAN R D',
-
-    "167": 'MATHAVAN S',
-
-    "168": 'MATHIARASAN E',
-
-    "169": 'MEENAKSHI A',
-
-    "170": 'MITHRAA A',
-
-    "171": 'MOHAMED ANEESUR RAHMAN A',
-
-    "172": 'MOHAMED JASIM M R',
-
-    "173": 'MOHAMMED NADEEM K S',
-
-    "174": 'MOHANKUMAR M',
-
-    "175": 'MOKSHITA K G',
-
-    "176": 'MONISH V',
-
-    "177": 'MONISHA V',
-
-    "178": 'MOONISHHA T',
-
-    "179": 'MOURIYA M',
-
-    "180": 'MUGUNDHASARAVANAN D',
-
-    "181": 'MUHAMMED JIYAD A',
-
-    "182": 'MUKUL V P',
-
-    "183": 'NAREN V',
-
+    "120": "JOAN MARSALINE A",
+    "121": "JOEL S",
+    "122": "K DEVADHARSHINI",
+    "123": "K DHANANJAY",
+    "124": "K M LEKHAA VARSHINI",
+    "125": "K R HARSHINI",
+    "126": "K SHAMITHA",
+    "127": "KAILASH SURYA P",
+    "128": "KAMALA KANNAN S",
+    "129": "KAMALI S B",
+    "130": "KANISHKA A",
+    "131": "KAPILVENKAT K",
+    "132": "KARTHICK S",
+    "133": "KARTHIGA D",
+    "134": "KARTHIGA S",
+    "135": "KARUNYA G",
+    "136": "KAVINAYA J",
+    "137": "KAVIYA G",
+    "138": "KAVIYA J",
+    "139": "KEERTHANA R",
+    "140": "KEERTHANA S",
+    "141": "KESAVARAM P",
+    "142": "KIRUPANITHI S",
+    "143": "KISHORE K",
+    "144": "KRISHITHA J",
+    "145": "KRISHNA A M",
+    "146": "KRITHICK S",
+    "147": "LAKSHAYA G",
+    "148": "LAKSHAYA NAGARAJAN",
+    "149": "LAKSHIKHAA SRI B",
+    "150": "LAKSHMAN M",
+    "151": "LAKSHMI PRIYA S",
+    "152": "LALITH CHANDAR M",
+    "153": "LAURA SUSAN C",
+    "154": "LAVANYA R",
+    "155": "LIVISHARAN E",
+    "156": "LOKESH D",
+    "157": "LOKESHWARI V",
+    "158": "M GUNADHARSHINI",
+    "159": "M S ABISHIEK",
+    "160": "M YASHWANTH SAI",
+    "161": "MADHAN RAJ D",
+    "162": "MALIK KANI M K",
+    "163": "MANASA S",
+    "164": "MANSI R",
+    "165": "MATHANGI P",
+    "166": "MATHAVAN R D",
+    "167": "MATHAVAN S",
+    "168": "MATHIARASAN E",
+    "169": "MEENAKSHI A",
+    "170": "MITHRAA A",
+    "171": "MOHAMED ANEESUR RAHMAN A",
+    "172": "MOHAMED JASIM M R",
+    "173": "MOHAMMED NADEEM K S",
+    "174": "MOHANKUMAR M",
+    "175": "MOKSHITA K G",
+    "176": "MONISH V",
+    "177": "MONISHA V",
+    "178": "MOONISHHA T",
+    "179": "MOURIYA M",
+    "180": "MUGUNDHASARAVANAN D",
+    "181": "MUHAMMED JIYAD A",
+    "182": "MUKUL V P",
+    "183": "NAREN V",
 }
-
-
-
-
 
 REGISTRATION_LAST4_TO_SNO: dict[str, str] = {
-
     "0553": "120",
-
     "1302": "121",
-
     "0398": "122",
-
     "0683": "123",
-
     "0707": "124",
-
     "1219": "125",
-
     "0517": "126",
-
     "0448": "127",
-
     "0184": "128",
-
     "0475": "129",
-
     "0215": "130",
-
     "0776": "131",
-
     "0504": "132",
-
     "0500": "133",
-
     "0167": "134",
-
     "1026": "135",
-
     "0777": "136",
-
     "0921": "137",
-
     "0991": "138",
-
     "0005": "139",
-
     "1466": "140",
-
     "1470": "141",
-
     "1354": "142",
-
     "0756": "143",
-
     "0491": "144",
-
     "0209": "145",
-
     "0718": "146",
-
     "1340": "147",
-
     "0652": "148",
-
     "1452": "149",
-
     "1402": "150",
-
     "1353": "151",
-
     "0898": "152",
-
     "0380": "153",
-
     "1050": "154",
-
     "0359": "155",
-
     "1261": "156",
-
     "0164": "157",
-
     "0358": "158",
-
     "0351": "159",
-
     "0365": "160",
-
     "0218": "161",
-
     "0395": "162",
-
     "0345": "163",
-
     "0724": "164",
-
     "0045": "165",
-
     "0378": "166",
-
     "0582": "167",
-
     "0559": "168",
-
     "0021": "169",
-
     "0779": "170",
-
     "0082": "171",
-
     "0079": "172",
-
     "0828": "173",
-
     "0927": "174",
-
     "1443": "175",
-
     "0354": "176",
-
     "0174": "177",
-
     "1372": "178",
-
     "0469": "179",
-
     "0393": "180",
-
     "1436": "181",
-
     "0125": "182",
-
     "0883": "183",
-
 }
 
-# ============================================================
 
+# ============================================================
 # SUBJECTS + STAFF
-
 # ============================================================
-
-
 
 SUBJECTS: dict[str, str] = {
-
     "Tamil": "Ms. S. Saranya",
-
     "Communicative English": "Ms. S. Siva Prathesha",
-
     "Algebra and Calculus": "Dr. G. SatheeshKumar",
-
     "Applied Chemistry": "Dr. A.R. Karthiga",
-
     "Computer Programming 1": "Ms. N. Suriya",
-
     "CAD Based Engineering graphics": "Dr. A. Saravanan",
-
     "Computer Programming laboratory I": "Ms. N. Suriya",
-
     "Makerspace": "Ms. R. Priyadharshini",
-
     "Seminar 1": "Ms. V. Ariyamala",
-
     "Seminar 2": "Ms. N. Suriya",
-
     "Seminar 3": "Ms. V. Ariyamala",
-
 }
 
 
+# ============================================================
+# APP
+# ============================================================
 
-
-
-# NOTE:
-
-# Makerspace password was not supplied by you.
-
-# This is a temporary placeholder and MUST be changed before
-
-# real deployment.
-
-SUBJECT_PASSWORDS: dict[str, str] = {
-
-    "Tamil": "Staff@tamil26",
-
-    "Communicative English": "Staff@english26",
-
-    "Algebra and Calculus": "Staff@maths26",
-
-    "Applied Chemistry": "Staff@chemistry26",
-
-    "Computer Programming 1": "Staff@cs26",
-
-    "CAD Based Engineering graphics": "Staff@eg26",
-
-    "Computer Programming laboratory I": "Staff@cs26",
-
-    "Makerspace": "Staff@makerspace26",
-
-    "Seminar 1": "Staff@seminar26",
-
-    "Seminar 2": "Staff@cs26",
-
-    "Seminar 3": "Staff@seminar26",
-
-}
-
-
-
-
-
-app = FastAPI(
-
-    title="College Attendance Backend",
-
-    version="2.0.0",
-
-)
-
-
-
-# Allow the Flutter Web frontend to call this backend from a browser.
-
-# Android/iOS clients are unaffected by this middleware.
+app = FastAPI(title="College Attendance Backend", version="3.0.0")
 
 app.add_middleware(
-
     CORSMiddleware,
-
-    allow_origins=["*"],
-
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-
     allow_methods=["*"],
-
     allow_headers=["*"],
-
 )
 
 
-
-
-
 # ============================================================
-
 # DATABASE
-
 # ============================================================
 
+_pool = None
 
 
+def _get_pool():
+    global _pool
+    if ConnectionPool is None or not DATABASE_URL:
+        return None
+    if _pool is None:
+        _pool = ConnectionPool(
+            DATABASE_URL,
+            min_size=1,
+            max_size=5,
+            kwargs={"row_factory": psycopg.rows.dict_row},
+            open=True,
+        )
+    return _pool
+
+
+@contextmanager
 def get_connection():
+    pool = _get_pool()
+    if pool is not None:
+        with pool.connection() as conn:
+            yield conn
+        return
 
-    return psycopg.connect(
-
-        DATABASE_URL,
-
-        row_factory=psycopg.rows.dict_row,
-
-    )
-
-
-
+    conn = psycopg.connect(DATABASE_URL, row_factory=psycopg.rows.dict_row)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_database() -> None:
-
     with get_connection() as conn:
-
         with conn.cursor() as cur:
-
             cur.execute(
-
                 """
-
                 CREATE TABLE IF NOT EXISTS students (
-
                     sno VARCHAR(10) PRIMARY KEY,
-
                     name TEXT NOT NULL
-
                 )
-
                 """
-
             )
 
-
-
             cur.execute(
-
                 """
-
                 CREATE TABLE IF NOT EXISTS student_passwords (
-
                     sno VARCHAR(10) PRIMARY KEY
-
                         REFERENCES students(sno)
-
                         ON DELETE CASCADE,
-
                     password_hash TEXT NOT NULL,
-
+                    email TEXT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-
                 )
-
                 """
-
+            )
+            # Upgrade path for databases created before the email column existed.
+            cur.execute(
+                "ALTER TABLE student_passwords ADD COLUMN IF NOT EXISTS email TEXT"
             )
 
-
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS staff_accounts (
+                    staff_name TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    must_change BOOLEAN NOT NULL DEFAULT TRUE,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
 
             cur.execute(
-
                 """
-
                 CREATE TABLE IF NOT EXISTS attendance_sessions (
-
                     id BIGSERIAL PRIMARY KEY,
-
                     subject TEXT NOT NULL,
-
                     staff_name TEXT NOT NULL,
-
                     period TEXT NOT NULL,
-
                     started_at TIMESTAMPTZ NOT NULL,
-
                     expires_at TIMESTAMPTZ NOT NULL,
-
                     closed_at TIMESTAMPTZ,
-
                     active BOOLEAN NOT NULL DEFAULT TRUE
-
                 )
-
                 """
-
             )
 
-
-
             cur.execute(
-
                 """
-
                 CREATE UNIQUE INDEX IF NOT EXISTS
-
                 one_active_attendance_session_per_subject
-
                 ON attendance_sessions (subject)
-
                 WHERE active = TRUE
-
                 """
-
             )
 
-
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                attendance_sessions_active_expires
+                ON attendance_sessions (active, expires_at)
+                """
+            )
 
             cur.execute(
-
                 """
-
                 CREATE TABLE IF NOT EXISTS attendance_codes (
-
                     id BIGSERIAL PRIMARY KEY,
-
                     session_id BIGINT NOT NULL
-
                         REFERENCES attendance_sessions(id)
-
                         ON DELETE CASCADE,
-
                     sno VARCHAR(10) NOT NULL
-
                         REFERENCES students(sno)
-
                         ON DELETE CASCADE,
-
                     code VARCHAR(20) NOT NULL,
-
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
                     UNIQUE(session_id, sno),
-
                     UNIQUE(session_id, code)
-
                 )
-
                 """
-
             )
 
-
-
             cur.execute(
-
                 """
-
                 CREATE TABLE IF NOT EXISTS attendance_records (
-
                     id BIGSERIAL PRIMARY KEY,
-
                     session_id BIGINT NOT NULL
-
                         REFERENCES attendance_sessions(id)
-
                         ON DELETE CASCADE,
-
                     sno VARCHAR(10) NOT NULL
-
                         REFERENCES students(sno)
-
                         ON DELETE CASCADE,
-
                     subject TEXT NOT NULL,
-
                     period TEXT NOT NULL,
-
                     attendance_date DATE NOT NULL,
-
                     marked_at TIMESTAMPTZ,
-
                     status VARCHAR(20) NOT NULL,
-
                     latitude DOUBLE PRECISION,
-
                     longitude DOUBLE PRECISION,
-
                     distance_meters DOUBLE PRECISION,
-
                     UNIQUE(session_id, sno)
-
                 )
-
                 """
-
             )
 
-
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                attendance_records_subject_sno
+                ON attendance_records (subject, sno)
+                """
+            )
 
             cur.execute(
-
                 """
-
                 CREATE TABLE IF NOT EXISTS attendance_device_locks (
-
                     id BIGSERIAL PRIMARY KEY,
-
                     session_id BIGINT NOT NULL
-
                         REFERENCES attendance_sessions(id)
-
                         ON DELETE CASCADE,
-
                     device_id TEXT NOT NULL,
-
                     sno VARCHAR(10) NOT NULL
-
                         REFERENCES students(sno)
-
                         ON DELETE CASCADE,
-
                     marked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
                     UNIQUE(session_id, device_id)
-
                 )
-
                 """
-
             )
-
-
 
             cur.execute(
-
                 """
-
                 CREATE TABLE IF NOT EXISTS verification_codes (
-
                     id BIGSERIAL PRIMARY KEY,
-
                     user_type VARCHAR(20) NOT NULL,
-
                     user_id TEXT NOT NULL,
-
                     verification_code VARCHAR(10) NOT NULL,
-
                     expires_at TIMESTAMPTZ NOT NULL,
-
                     used BOOLEAN NOT NULL DEFAULT FALSE,
-
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-
                 )
-
                 """
-
             )
 
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                verification_codes_lookup
+                ON verification_codes (user_type, user_id, used, expires_at)
+                """
+            )
 
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS erp_sync_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    subject TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    period_start DATE,
+                    period_end DATE,
+                    student_count INTEGER NOT NULL DEFAULT 0,
+                    recipients TEXT,
+                    status TEXT NOT NULL,
+                    detail TEXT,
+                    generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
 
             for sno, name in STUDENTS.items():
-
                 cur.execute(
-
                     """
-
                     INSERT INTO students (sno, name)
-
                     VALUES (%s, %s)
-
                     ON CONFLICT (sno)
-
                     DO UPDATE SET name = EXCLUDED.name
-
                     """,
-
                     (sno, name),
-
                 )
 
-
+            # Seed one account per staff member with a unique random password.
+            for staff_name in sorted(set(SUBJECTS.values())):
+                cur.execute(
+                    "SELECT 1 FROM staff_accounts WHERE staff_name = %s",
+                    (staff_name,),
+                )
+                if cur.fetchone():
+                    continue
+                initial_password = "Svce@" + secrets.token_hex(3)
+                cur.execute(
+                    """
+                    INSERT INTO staff_accounts
+                        (staff_name, password_hash, must_change)
+                    VALUES (%s, %s, TRUE)
+                    """,
+                    (staff_name, hash_password(initial_password)),
+                )
+                log.warning(
+                    "[staff-init] %s initial password: %s (must be changed on first login)",
+                    staff_name,
+                    initial_password,
+                )
 
         conn.commit()
-
-
-
 
 
 @app.on_event("startup")
-
-def startup_event():
-
+def startup_event() -> None:
+    if not DATABASE_URL:
+        log.error("DATABASE_URL is not set. Database calls will fail.")
+        return
     init_database()
 
 
-
-
-
 # ============================================================
-
 # HELPERS
-
 # ============================================================
-
 
 
 def now_utc() -> datetime:
-
     return datetime.now(timezone.utc)
 
 
-
+# ---- password hashing (PBKDF2-HMAC-SHA256, with legacy SHA-256 support) ----
 
 
 def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        PBKDF2_ITERATIONS,
+    )
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt}${digest.hex()}"
 
-    return hashlib.sha256(
 
-        password.encode("utf-8")
-
-    ).hexdigest()
+def _legacy_sha256(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
+def verify_password(password: str, stored: str) -> tuple[bool, bool]:
+    """Return (is_valid, needs_rehash)."""
+    if not stored:
+        return False, False
 
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, iterations, salt, digest = stored.split("$")
+            computed = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                bytes.fromhex(salt),
+                int(iterations),
+            )
+            return secrets.compare_digest(computed.hex(), digest), False
+        except Exception:
+            return False, False
+
+    # Legacy unsalted SHA-256 from an earlier version.
+    valid = secrets.compare_digest(_legacy_sha256(password), stored)
+    return valid, valid
+
+
+# ---- simple in-process rate limiting ----
+
+
+_rate_buckets: dict[str, list[float]] = {}
+
+
+def rate_limit(key: str, limit: int, window_seconds: int) -> None:
+    now = time.monotonic()
+    bucket = [t for t in _rate_buckets.get(key, []) if now - t < window_seconds]
+    if len(bucket) >= limit:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts. Please wait a moment and try again.",
+        )
+    bucket.append(now)
+    _rate_buckets[key] = bucket
+
+
+# ---- email ----
+
+
+def send_email(
+    to_address: Optional[str],
+    subject: str,
+    body: str,
+    attachment: Optional[tuple[str, bytes]] = None,
+) -> bool:
+    if not to_address:
+        return False
+
+    if not (SMTP_HOST and SMTP_FROM):
+        log.warning(
+            "[email-disabled] SMTP is not configured. Would send %r to %s. Body:\n%s",
+            subject,
+            to_address,
+            body,
+        )
+        return False
+
+    message = EmailMessage()
+    message["From"] = SMTP_FROM
+    message["To"] = to_address
+    message["Subject"] = subject
+    message.set_content(body)
+
+    if attachment is not None:
+        filename, data = attachment
+        message.add_attachment(
+            data,
+            maintype="application",
+            subtype=(
+                "vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            filename=filename,
+        )
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=25) as server:
+            server.starttls(context=ssl.create_default_context())
+            if SMTP_USER:
+                server.login(SMTP_USER, SMTP_PASSWORD or "")
+            server.send_message(message)
+        return True
+    except Exception as exc:  # pragma: no cover - network dependent
+        log.error("Failed to send email to %s: %s", to_address, exc)
+        return False
 
 
 def sno_from_registration_last4(last4: str) -> str:
-
-    value = last4.strip()
-
+    value = (last4 or "").strip()
     if not re.fullmatch(r"\d{4}", value):
-
-        raise HTTPException(status_code=400, detail="Enter exactly the last 4 digits of your registration number.")
-
+        raise HTTPException(
+            status_code=400,
+            detail="Enter exactly the last 4 digits of your registration number.",
+        )
     sno = REGISTRATION_LAST4_TO_SNO.get(value)
-
     if sno is None:
-
-        raise HTTPException(status_code=404, detail="Registration number suffix not found.")
-
+        raise HTTPException(
+            status_code=404,
+            detail="Registration number suffix not found.",
+        )
     return sno
 
 
-
-
-
 def make_code() -> str:
-
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
-
-
-
-def distance_meters(
-
-    lat1: float,
-
-    lon1: float,
-
-    lat2: float,
-
-    lon2: float,
-
-) -> float:
-
+def distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     radius = 6_371_000.0
-
-
-
     p1 = math.radians(lat1)
-
     p2 = math.radians(lat2)
-
     dp = math.radians(lat2 - lat1)
-
     dl = math.radians(lon2 - lon1)
-
-
-
     a = (
-
         math.sin(dp / 2) ** 2
-
-        + math.cos(p1)
-
-        * math.cos(p2)
-
-        * math.sin(dl / 2) ** 2
-
+        + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     )
+    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-
-    return radius * 2 * math.atan2(
-
-        math.sqrt(a),
-
-        math.sqrt(1 - a),
-
-    )
-
-
-
+# ---- session helpers ----
 
 
 def close_expired_sessions() -> None:
-
-    """
-
-    Closes expired sessions and permanently records Absent
-
-    for every student who never marked attendance.
-
-
-
-    IMPORTANT:
-
-    This does NOT put Present students in the absentee list.
-
-    It records Absent only for students without a Present record.
-
-    """
-
+    """Close expired sessions and record Absent for anyone not Present."""
     current = now_utc()
 
-
-
     with get_connection() as conn:
-
         with conn.cursor() as cur:
-
             cur.execute(
-
                 """
-
                 SELECT *
-
                 FROM attendance_sessions
-
                 WHERE active = TRUE
-
                   AND expires_at <= %s
-
                 FOR UPDATE
-
                 """,
-
                 (current,),
-
             )
-
-
-
             sessions = cur.fetchall()
 
-
-
             for session in sessions:
-
                 cur.execute(
-
                     """
-
                     UPDATE attendance_sessions
-
-                    SET active = FALSE,
-
-                        closed_at = %s
-
+                    SET active = FALSE, closed_at = %s
                     WHERE id = %s
-
                     """,
-
                     (current, session["id"]),
-
                 )
-
-
-
-                # Finalize only students who did NOT mark Present.
 
                 cur.execute(
-
                     """
-
                     INSERT INTO attendance_records
-
                     (
-
-                        session_id,
-
-                        sno,
-
-                        subject,
-
-                        period,
-
-                        attendance_date,
-
-                        marked_at,
-
-                        status
-
+                        session_id, sno, subject, period,
+                        attendance_date, marked_at, status
                     )
-
                     SELECT
-
-                        %s,
-
-                        s.sno,
-
-                        %s,
-
-                        %s,
-
-                        %s,
-
-                        NULL,
-
-                        'Absent'
-
+                        %s, s.sno, %s, %s, %s, NULL, 'Absent'
                     FROM students s
-
                     WHERE NOT EXISTS (
-
                         SELECT 1
-
                         FROM attendance_records ar
-
                         WHERE ar.session_id = %s
-
                           AND ar.sno = s.sno
-
                           AND ar.status = 'Present'
-
                     )
-
-                    ON CONFLICT (session_id, sno)
-
-                    DO NOTHING
-
+                    ON CONFLICT (session_id, sno) DO NOTHING
                     """,
-
                     (
-
                         session["id"],
-
                         session["subject"],
-
                         session["period"],
-
                         session["started_at"].date(),
-
                         session["id"],
-
                     ),
-
                 )
-
-
 
         conn.commit()
-
-
-
 
 
 def get_active_session():
-
-    """Return the currently usable session without taking expiry locks.
-
-
-
-    Expired sessions are finalized separately by the endpoints that need
-
-    absentee records. Keeping this lookup read-only prevents repeated
-
-    student requests from competing for the same expired-session lock.
-
-    """
-
+    """Return the most recently started usable session (any subject)."""
     current = now_utc()
-
-
-
     with get_connection() as conn:
-
         with conn.cursor() as cur:
-
             cur.execute(
-
                 """
-
                 SELECT *
-
                 FROM attendance_sessions
-
                 WHERE active = TRUE
-
                   AND expires_at > %s
-
                 ORDER BY started_at DESC
-
                 LIMIT 1
-
                 """,
-
                 (current,),
-
             )
-
             return cur.fetchone()
 
 
-
+def get_active_session_for_subject(subject: str):
+    current = now_utc()
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM attendance_sessions
+                WHERE subject = %s
+                  AND active = TRUE
+                  AND expires_at > %s
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (subject, current),
+            )
+            return cur.fetchone()
 
 
 def get_latest_session_for_subject(subject: str):
-
     with get_connection() as conn:
-
         with conn.cursor() as cur:
-
             cur.execute(
-
                 """
-
                 SELECT *
-
                 FROM attendance_sessions
-
                 WHERE subject = %s
-
                 ORDER BY started_at DESC
-
                 LIMIT 1
-
                 """,
-
                 (subject,),
-
             )
-
             return cur.fetchone()
 
 
-
-
-
 # ============================================================
-
 # BASIC
-
 # ============================================================
-
 
 
 @app.get("/")
-
 def root():
-
     return {
-
         "message": "College Attendance Backend is running",
-
         "students": len(STUDENTS),
-
         "subjects": len(SUBJECTS),
-
         "code_validity_minutes": CODE_VALIDITY_MINUTES,
-
+        "max_distance_meters": MAX_ATTENDANCE_DISTANCE_METERS,
+        "semester_start": SEMESTER_START,
+        "semester_end": SEMESTER_END,
+        "erp_mode": ERP_MODE,
     }
-
-
-
 
 
 @app.get("/health")
-
 def health():
-
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 AS ok")
+                cur.fetchone()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Database unavailable: {exc}"
+        )
     return {"status": "ok", "database": "connected"}
 
 
-
-
-
-# ============================================================
-
-# SUBJECTS
-
-# ============================================================
-
-
-
 @app.get("/subjects")
-
 def list_subjects():
-
     return [
-
-        {
-
-            "subject": subject,
-
-            "staff": staff,
-
-        }
-
+        {"subject": subject, "staff": staff}
         for subject, staff in SUBJECTS.items()
-
     ]
 
 
+# ============================================================
+# STAFF AUTHENTICATION (one password per staff member)
+# ============================================================
 
+
+class StaffVerifyRequest(BaseModel):
+    subject: str
+    password: str
+
+
+class StaffChangePasswordRequest(BaseModel):
+    subject: str
+    current_password: str
+    new_password: str
+
+
+def _staff_account(staff_name: str):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM staff_accounts WHERE staff_name = %s",
+                (staff_name,),
+            )
+            return cur.fetchone()
 
 
 @app.post("/staff/verify-subject")
-
-def verify_subject_password(
-
-    subject: str,
-
-    password: str,
-
-):
-
+def verify_subject_password(request: StaffVerifyRequest):
+    subject = request.subject.strip()
     if subject not in SUBJECTS:
+        raise HTTPException(status_code=404, detail="Subject not found.")
 
+    staff_name = SUBJECTS[subject]
+    rate_limit(f"staff-login:{staff_name}", limit=10, window_seconds=300)
+
+    account = _staff_account(staff_name)
+    if not account:
         raise HTTPException(
-
-            status_code=404,
-
-            detail="Subject not found.",
-
-        )
-
-
-
-    expected = SUBJECT_PASSWORDS.get(subject)
-
-
-
-    if expected is None:
-
-        raise HTTPException(
-
             status_code=500,
-
-            detail="Password is not configured for this subject.",
-
+            detail="Staff account is not configured.",
         )
 
+    valid, needs_rehash = verify_password(
+        request.password, account["password_hash"]
+    )
+    if not valid:
+        raise HTTPException(status_code=401, detail="Incorrect password.")
 
-
-    if not secrets.compare_digest(password, expected):
-
-        raise HTTPException(
-
-            status_code=401,
-
-            detail="Incorrect subject password.",
-
-        )
-
-
+    if needs_rehash:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE staff_accounts SET password_hash = %s WHERE staff_name = %s",
+                    (hash_password(request.password), staff_name),
+                )
+            conn.commit()
 
     return {
-
         "success": True,
-
         "subject": subject,
-
-        "staff": SUBJECTS[subject],
-
+        "staff": staff_name,
+        "must_change_password": bool(account["must_change"]),
     }
 
 
+@app.post("/staff/change-password")
+def change_staff_password(request: StaffChangePasswordRequest):
+    subject = request.subject.strip()
+    if subject not in SUBJECTS:
+        raise HTTPException(status_code=404, detail="Subject not found.")
 
+    if len(request.new_password) < MIN_PASSWORD_LENGTH + 2:
+        raise HTTPException(
+            status_code=400,
+            detail="New password must contain at least 6 characters.",
+        )
+
+    staff_name = SUBJECTS[subject]
+    account = _staff_account(staff_name)
+    if not account:
+        raise HTTPException(
+            status_code=500, detail="Staff account is not configured."
+        )
+
+    valid, _ = verify_password(request.current_password, account["password_hash"])
+    if not valid:
+        raise HTTPException(
+            status_code=401, detail="Current password is incorrect."
+        )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE staff_accounts
+                SET password_hash = %s,
+                    must_change = FALSE,
+                    updated_at = NOW()
+                WHERE staff_name = %s
+                """,
+                (hash_password(request.new_password), staff_name),
+            )
+        conn.commit()
+
+    return {"success": True, "subject": subject, "staff": staff_name}
 
 
 # ============================================================
-
 # START ATTENDANCE
-
 # ============================================================
-
 
 
 @app.post("/attendance/start")
-
 def start_attendance(
-
     subject: str = Query(...),
-
     period: Optional[str] = Query(None),
-
+    password: Optional[str] = Query(None),
 ):
-
     if subject not in SUBJECTS:
+        raise HTTPException(status_code=404, detail="Subject not found.")
 
-        raise HTTPException(
-
-            status_code=404,
-
-            detail="Subject not found.",
-
-        )
-
-
-
-    # Finalize an expired session before starting another one.
-
-    # This is intentionally done before the transaction below so an old
-
-    # 15-minute session can never block the next Generate Code operation.
+    if password is not None:
+        account = _staff_account(SUBJECTS[subject])
+        if account and not verify_password(password, account["password_hash"])[0]:
+            raise HTTPException(status_code=401, detail="Incorrect password.")
 
     close_expired_sessions()
 
-
-
     current = now_utc()
-
     expires = current + timedelta(minutes=CODE_VALIDITY_MINUTES)
 
-
-
     if period is None or not period.strip():
-
         with get_connection() as conn:
-
             with conn.cursor() as cur:
-
                 cur.execute(
-
                     """
-
                     SELECT COUNT(*) AS count
-
                     FROM attendance_sessions
-
                     WHERE subject = %s
-
                       AND started_at::date = %s
-
                     """,
-
-                    (
-
-                        subject,
-
-                        current.date(),
-
-                    ),
-
+                    (subject, current.date()),
                 )
-
                 number = int(cur.fetchone()["count"]) + 1
-
-
-
         period = f"Session {number}"
-
     else:
-
         period = period.strip()
 
-
-
     with get_connection() as conn:
-
         with conn.cursor() as cur:
-
-            # Serialize concurrent Generate Code requests.
-
-            # PostgreSQL releases this lock automatically when the transaction ends.
-
             cur.execute("SELECT pg_advisory_xact_lock(%s)", (918273645,))
 
-
-
-            # Sessions are independent by subject. A Maths session must not
-
-            # prevent a Tamil session from being started, and vice versa.
-
             cur.execute(
-
                 """
-
                 SELECT *
-
                 FROM attendance_sessions
-
                 WHERE subject = %s
-
                   AND active = TRUE
-
                   AND expires_at > %s
-
                 ORDER BY started_at DESC
-
                 LIMIT 1
-
                 """,
-
                 (subject, current),
-
             )
-
             active = cur.fetchone()
 
-
-
             if active:
-
                 raise HTTPException(
-
                     status_code=409,
-
                     detail=(
-
                         f"An attendance session is already active for "
-
                         f"{active['subject']} ({active['period']})."
-
                     ),
-
                 )
-
-
 
             cur.execute(
-
                 """
-
                 INSERT INTO attendance_sessions
-
-                (
-
-                    subject,
-
-                    staff_name,
-
-                    period,
-
-                    started_at,
-
-                    expires_at,
-
-                    active
-
-                )
-
+                (subject, staff_name, period, started_at, expires_at, active)
                 VALUES (%s, %s, %s, %s, %s, TRUE)
-
                 RETURNING id
-
                 """,
-
-                (
-
-                    subject,
-
-                    SUBJECTS[subject],
-
-                    period,
-
-                    current,
-
-                    expires,
-
-                ),
-
+                (subject, SUBJECTS[subject], period, current, expires),
             )
-
-
-
             session_id = cur.fetchone()["id"]
 
-
-
             used_codes: set[str] = set()
-
-
-
-            for sno in sorted(
-
-                STUDENTS,
-
-                key=lambda value: int(value),
-
-            ):
-
+            for sno in sorted(STUDENTS, key=lambda value: int(value)):
                 code = make_code()
-
-
-
                 while code in used_codes:
-
                     code = make_code()
-
-
-
                 used_codes.add(code)
-
-
-
                 cur.execute(
-
                     """
-
-                    INSERT INTO attendance_codes
-
-                    (
-
-                        session_id,
-
-                        sno,
-
-                        code
-
-                    )
-
+                    INSERT INTO attendance_codes (session_id, sno, code)
                     VALUES (%s, %s, %s)
-
                     """,
-
-                    (
-
-                        session_id,
-
-                        sno,
-
-                        code,
-
-                    ),
-
+                    (session_id, sno, code),
                 )
-
-
 
         conn.commit()
 
-
-
     return {
-
         "success": True,
-
         "session_id": session_id,
-
         "subject": subject,
-
         "staff": SUBJECTS[subject],
-
         "period": period,
-
         "started_at": current.isoformat(),
-
         "expires_at": expires.isoformat(),
-
         "valid_for_minutes": CODE_VALIDITY_MINUTES,
-
     }
 
 
-
-
-
 # ============================================================
-
 # STUDENT'S OWN CODE
-
 # ============================================================
-
 
 
 @app.get("/attendance/my-code/{sno}")
-
-def get_my_code(sno: str):
-
+def get_my_code(sno: str, subject: Optional[str] = Query(None)):
     if sno not in STUDENTS:
+        raise HTTPException(status_code=404, detail="Student S.No. not found.")
 
-        raise HTTPException(
-
-            status_code=404,
-
-            detail="Student S.No. not found.",
-
-        )
-
-
-
-    session = get_active_session()
-
-
-
+    session = (
+        get_active_session_for_subject(subject)
+        if subject
+        else get_active_session()
+    )
     if not session:
-
         raise HTTPException(
-
-            status_code=404,
-
-            detail="No active attendance session.",
-
+            status_code=404, detail="No active attendance session."
         )
-
-
 
     with get_connection() as conn:
-
         with conn.cursor() as cur:
-
             cur.execute(
-
                 """
-
                 SELECT code
-
                 FROM attendance_codes
-
-                WHERE session_id = %s
-
-                  AND sno = %s
-
+                WHERE session_id = %s AND sno = %s
                 """,
-
-                (
-
-                    session["id"],
-
-                    sno,
-
-                ),
-
+                (session["id"], sno),
             )
-
-
-
             result = cur.fetchone()
 
-
-
     if not result:
-
-        raise HTTPException(
-
-            status_code=404,
-
-            detail="Attendance code not found.",
-
-        )
-
-
+        raise HTTPException(status_code=404, detail="Attendance code not found.")
 
     return {
-
         "sno": sno,
-
         "name": STUDENTS[sno],
-
         "code": result["code"],
-
         "subject": session["subject"],
-
         "period": session["period"],
-
         "expires_at": session["expires_at"].isoformat(),
-
     }
 
 
-
-
-
 # ============================================================
-
 # MARK ATTENDANCE
-
 # ============================================================
-
 
 
 class MarkAttendanceRequest(BaseModel):
-
     sno: str
-
     code: str
-
     device_id: str = Field(min_length=8, max_length=200)
-
     latitude: Optional[float] = Field(default=None)
-
     longitude: Optional[float] = Field(default=None)
 
 
-
-
-
 @app.post("/attendance/mark")
-
 def mark_attendance(request: MarkAttendanceRequest):
-
     sno = request.sno.strip()
-
     code = request.code.strip()
 
-
-
     if sno not in STUDENTS:
-
-        raise HTTPException(
-
-            status_code=404,
-
-            detail="Student S.No. not found.",
-
-        )
-
-
+        raise HTTPException(status_code=404, detail="Student S.No. not found.")
 
     session = get_active_session()
-
-
-
     if not session:
-
-        raise HTTPException(
-
-            status_code=410,
-
-            detail="Attendance session has ended.",
-
-        )
-
-
+        raise HTTPException(status_code=410, detail="Attendance session has ended.")
 
     with get_connection() as conn:
-
         with conn.cursor() as cur:
-
-            # Verify that the code belongs specifically to this student
-
-            # and specifically to the current session.
-
             cur.execute(
-
                 """
-
                 SELECT id
-
                 FROM attendance_codes
-
-                WHERE session_id = %s
-
-                  AND sno = %s
-
-                  AND code = %s
-
+                WHERE session_id = %s AND sno = %s AND code = %s
                 """,
-
-                (
-
-                    session["id"],
-
-                    sno,
-
-                    code,
-
-                ),
-
+                (session["id"], sno, code),
             )
-
-
-
-            code_record = cur.fetchone()
-
-
-
-            if not code_record:
-
+            if not cur.fetchone():
                 raise HTTPException(
-
-                    status_code=401,
-
-                    detail="Invalid attendance code.",
-
+                    status_code=401, detail="Invalid attendance code."
                 )
-
-
-
-            # One app installation/device can mark only one student's
-
-            # attendance during this attendance session.
 
             device_id = request.device_id.strip()
-
             if not device_id:
-
                 raise HTTPException(
-
-                    status_code=400,
-
-                    detail="Device identification is required.",
-
+                    status_code=400, detail="Device identification is required."
                 )
 
-
-
             cur.execute(
-
                 """
-
                 SELECT sno
-
                 FROM attendance_device_locks
-
-                WHERE session_id = %s
-
-                  AND device_id = %s
-
+                WHERE session_id = %s AND device_id = %s
                 FOR UPDATE
-
                 """,
-
                 (session["id"], device_id),
-
             )
-
             existing_device_lock = cur.fetchone()
-
-
-
             if existing_device_lock:
-
                 if existing_device_lock["sno"] == sno:
-
                     raise HTTPException(
-
                         status_code=409,
-
                         detail="Attendance is already marked from this device for this session.",
-
                     )
-
                 raise HTTPException(
-
                     status_code=409,
-
                     detail="This device has already been used to mark attendance for this session.",
-
                 )
-
-
-
-            # Duplicate prevention.
 
             cur.execute(
-
                 """
-
                 SELECT id
-
                 FROM attendance_records
-
-                WHERE session_id = %s
-
-                  AND sno = %s
-
-                  AND status = 'Present'
-
+                WHERE session_id = %s AND sno = %s AND status = 'Present'
                 """,
-
-                (
-
-                    session["id"],
-
-                    sno,
-
-                ),
-
+                (session["id"], sno),
             )
-
-
-
             if cur.fetchone():
-
                 raise HTTPException(
-
-                    status_code=409,
-
-                    detail="Attendance is already marked.",
-
+                    status_code=409, detail="Attendance is already marked."
                 )
-
-
-
-            # Location verification.
 
             distance = None
-
-
-
             if LOCATION_REQUIRED:
-
-                if (
-
-                    request.latitude is None
-
-                    or request.longitude is None
-
-                ):
-
+                if request.latitude is None or request.longitude is None:
                     raise HTTPException(
-
-                        status_code=400,
-
-                        detail="Location is required.",
-
+                        status_code=400, detail="Location is required."
                     )
-
-
-
-                if (
-
-                    CLASSROOM_LATITUDE == 0.0
-
-                    and CLASSROOM_LONGITUDE == 0.0
-
-                ):
-
-                    raise HTTPException(
-
-                        status_code=500,
-
-                        detail="Classroom coordinates are not configured.",
-
-                    )
-
-
 
                 distance = distance_meters(
-
                     request.latitude,
-
                     request.longitude,
-
                     CLASSROOM_LATITUDE,
-
                     CLASSROOM_LONGITUDE,
-
                 )
 
-
-
                 if distance > MAX_ATTENDANCE_DISTANCE_METERS:
-
                     raise HTTPException(
-
                         status_code=403,
-
                         detail=(
-
                             "You are outside the classroom area. "
-
                             f"Distance: {distance:.1f} m."
-
                         ),
-
                     )
-
-
 
             marked_at = now_utc()
 
-
-
             cur.execute(
-
                 """
-
                 INSERT INTO attendance_records
-
                 (
-
-                    session_id,
-
-                    sno,
-
-                    subject,
-
-                    period,
-
-                    attendance_date,
-
-                    marked_at,
-
-                    status,
-
-                    latitude,
-
-                    longitude,
-
-                    distance_meters
-
+                    session_id, sno, subject, period,
+                    attendance_date, marked_at, status,
+                    latitude, longitude, distance_meters
                 )
-
-                VALUES
-
-                (
-
-                    %s, %s, %s, %s, %s,
-
-                    %s, 'Present', %s, %s, %s
-
-                )
-
+                VALUES (%s, %s, %s, %s, %s, %s, 'Present', %s, %s, %s)
                 """,
-
                 (
-
                     session["id"],
-
                     sno,
-
                     session["subject"],
-
                     session["period"],
-
                     marked_at.date(),
-
                     marked_at,
-
                     request.latitude,
-
                     request.longitude,
-
                     distance,
-
                 ),
-
             )
-
-
 
             cur.execute(
-
                 """
-
                 INSERT INTO attendance_device_locks
-
-                (
-
-                    session_id,
-
-                    device_id,
-
-                    sno,
-
-                    marked_at
-
-                )
-
+                (session_id, device_id, sno, marked_at)
                 VALUES (%s, %s, %s, %s)
-
                 """,
-
-                (
-
-                    session["id"],
-
-                    device_id,
-
-                    sno,
-
-                    marked_at,
-
-                ),
-
+                (session["id"], device_id, sno, marked_at),
             )
-
-
 
         conn.commit()
 
-
-
     return {
-
         "success": True,
-
         "sno": sno,
-
         "name": STUDENTS[sno],
-
         "subject": session["subject"],
-
         "period": session["period"],
-
         "date": marked_at.date().isoformat(),
-
         "status": "Present",
-
     }
 
 
-
-
-
 # ============================================================
-
 # ABSENTEES
-
 # ============================================================
-
 
 
 @app.get("/attendance/absentees")
-
-def get_absentees(
-
-    subject: str = Query(...),
-
-):
-
+def get_absentees(subject: str = Query(...)):
     if subject not in SUBJECTS:
-
-        raise HTTPException(
-
-            status_code=404,
-
-            detail="Subject not found.",
-
-        )
-
-
-
-    # If the 15-minute session has ended, finalize absent records
-
-    # before calculating the list.
+        raise HTTPException(status_code=404, detail="Subject not found.")
 
     close_expired_sessions()
 
-
-
-    active = get_active_session()
-
-
-
-    if active and active["subject"] == subject:
-
-        session = active
-
-    else:
-
-        session = get_latest_session_for_subject(subject)
-
-
+    active = get_active_session_for_subject(subject)
+    session = active or get_latest_session_for_subject(subject)
 
     if not session:
-
         return {
-
             "subject": subject,
-
             "period": None,
-
             "date": None,
-
             "session_id": None,
-
             "active": False,
-
             "absentees": [],
-
         }
 
-
-
-    # THIS IS THE IMPORTANT PART:
-
-    #
-
-    # Start with the COMPLETE class list.
-
-    # Remove everyone who has PRESENT attendance in this session.
-
-    #
-
-    # Therefore the response contains ONLY students who did not
-
-    # mark attendance.
-
     with get_connection() as conn:
-
         with conn.cursor() as cur:
-
             cur.execute(
-
                 """
-
-                SELECT
-
-                    s.sno,
-
-                    s.name
-
+                SELECT s.sno, s.name
                 FROM students s
-
                 WHERE NOT EXISTS (
-
                     SELECT 1
-
                     FROM attendance_records ar
-
                     WHERE ar.session_id = %s
-
                       AND ar.sno = s.sno
-
                       AND ar.status = 'Present'
-
                 )
-
                 ORDER BY s.sno::INTEGER ASC
-
                 """,
-
                 (session["id"],),
-
             )
-
-
-
             absentees = cur.fetchall()
 
-
-
     return {
-
         "subject": session["subject"],
-
         "period": session["period"],
-
         "date": session["started_at"].date().isoformat(),
-
         "session_id": session["id"],
-
         "active": session["active"],
-
         "expires_at": session["expires_at"].isoformat(),
-
         "absentee_count": len(absentees),
-
         "absentees": absentees,
-
     }
 
 
-
-
-
-
-
 # ============================================================
-
-# ABSENTEE HISTORY
-
+# ABSENTEE HISTORY (kept for the staff "just finished" view)
 # ============================================================
-
 
 
 @app.get("/attendance/absentee-history")
-
 def get_absentee_history(subject: str = Query(...)):
+    """Latest session's absentee list for a subject.
 
-    """Return the latest subject's absentee list for 45 minutes after expiry.
-
-
-
-    Attendance records remain stored permanently, but the staff UI exposes
-
-    the absentee list only for ABSENTEE_VISIBILITY_MINUTES after that
-
-    specific subject session expires. A later session for the same subject
-
-    replaces the earlier visible list.
-
+    Unlike the original version this does NOT hide the list after a fixed
+    window; attendance is meant to stay visible for the whole semester.
+    A newer active session still suppresses the older list.
     """
-
     if subject not in SUBJECTS:
-
         raise HTTPException(status_code=404, detail="Subject not found.")
-
-
 
     close_expired_sessions()
 
-    current = now_utc()
-
-
-
     with get_connection() as conn:
-
         with conn.cursor() as cur:
-
             cur.execute(
-
                 """
-
                 SELECT *
-
                 FROM attendance_sessions
-
                 WHERE subject = %s
-
                 ORDER BY started_at DESC
-
                 LIMIT 1
-
                 """,
-
                 (subject,),
-
             )
-
             session = cur.fetchone()
 
-
-
             if not session:
-
                 return {
-
                     "subject": subject,
-
                     "date": None,
-
                     "session_id": None,
-
                     "visible_until": None,
-
                     "absentees": [],
-
                 }
 
-
-
-            # Do not expose an absentee list while a new session is active.
-
-            if session["active"] or session["expires_at"] > current:
-
+            if session["active"]:
                 return {
-
                     "subject": subject,
-
                     "date": None,
-
                     "session_id": session["id"],
-
                     "visible_until": None,
-
                     "absentees": [],
-
                 }
-
-
-
-            visible_until = session["expires_at"] + timedelta(
-
-                minutes=ABSENTEE_VISIBILITY_MINUTES
-
-            )
-
-
-
-            if current >= visible_until:
-
-                return {
-
-                    "subject": subject,
-
-                    "date": None,
-
-                    "session_id": session["id"],
-
-                    "visible_until": visible_until.isoformat(),
-
-                    "absentees": [],
-
-                }
-
-
-
-            # Calculate absentees directly from the class roster minus
-
-            # students who were marked Present for this exact session.
-
-            # This makes the list reliable even if the finalization request
-
-            # and the UI expiry timer happen at slightly different moments.
 
             cur.execute(
-
                 """
-
                 SELECT s.sno, s.name
-
                 FROM students s
-
                 WHERE NOT EXISTS (
-
                     SELECT 1
-
                     FROM attendance_records ar
-
                     WHERE ar.session_id = %s
-
                       AND ar.sno = s.sno
-
                       AND ar.status = 'Present'
-
                 )
-
                 ORDER BY s.sno::INTEGER ASC
-
                 """,
-
                 (session["id"],),
-
             )
-
             rows = cur.fetchall()
 
-
-
     return {
-
         "subject": subject,
-
         "date": session["started_at"].date().isoformat(),
-
         "session_id": session["id"],
-
-        "visible_until": visible_until.isoformat(),
-
+        "visible_until": None,
         "absentees": rows,
-
     }
 
 
+# ============================================================
+# SEMESTER REPORTS
+# ============================================================
 
+
+def _parse_date(value: Optional[str], field: str):
+    if value is None or not value.strip():
+        return None
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} must be in YYYY-MM-DD format.",
+        )
+
+
+def _semester_rows(
+    cur,
+    subject: str,
+    start_date=None,
+    end_date=None,
+) -> list[dict]:
+    query = """
+        SELECT
+            s.sno,
+            s.name,
+            COALESCE(SUM(CASE WHEN ar.status = 'Present' THEN 1 ELSE 0 END), 0)
+                AS present,
+            COALESCE(SUM(CASE WHEN ar.status = 'Absent' THEN 1 ELSE 0 END), 0)
+                AS absent,
+            COUNT(ar.id) AS total
+        FROM students s
+        LEFT JOIN attendance_records ar
+            ON ar.sno = s.sno
+           AND ar.subject = %s
+    """
+    params: list = [subject]
+    if start_date is not None:
+        query += " AND ar.attendance_date >= %s"
+        params.append(start_date)
+    if end_date is not None:
+        query += " AND ar.attendance_date <= %s"
+        params.append(end_date)
+
+    query += """
+        GROUP BY s.sno, s.name
+        ORDER BY s.sno::INTEGER ASC
+    """
+    cur.execute(query, params)
+    rows = cur.fetchall()
+
+    result = []
+    for row in rows:
+        present = int(row["present"])
+        absent = int(row["absent"])
+        total = int(row["total"])
+        percentage = round((present / total) * 100, 2) if total else 0.0
+        result.append(
+            {
+                "sno": row["sno"],
+                "name": row["name"],
+                "present": present,
+                "absent": absent,
+                "total": total,
+                "percentage": percentage,
+            }
+        )
+    return result
+
+
+@app.get("/attendance/sessions")
+def list_subject_sessions(
+    subject: str = Query(...),
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+):
+    if subject not in SUBJECTS:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    close_expired_sessions()
+
+    start = _parse_date(from_date, "from")
+    end = _parse_date(to_date, "to")
+
+    query = """
+        SELECT
+            ses.id,
+            ses.period,
+            ses.started_at,
+            ses.expires_at,
+            ses.closed_at,
+            ses.active,
+            COUNT(ar.id) FILTER (WHERE ar.status = 'Present') AS present,
+            COUNT(ar.id) FILTER (WHERE ar.status = 'Absent') AS absent
+        FROM attendance_sessions ses
+        LEFT JOIN attendance_records ar ON ar.session_id = ses.id
+        WHERE ses.subject = %s
+    """
+    params: list = [subject]
+    if start is not None:
+        query += " AND ses.started_at::date >= %s"
+        params.append(start)
+    if end is not None:
+        query += " AND ses.started_at::date <= %s"
+        params.append(end)
+    query += " GROUP BY ses.id ORDER BY ses.started_at DESC"
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            sessions = cur.fetchall()
+
+    return {
+        "subject": subject,
+        "staff": SUBJECTS[subject],
+        "sessions": [
+            {
+                "session_id": s["id"],
+                "period": s["period"],
+                "started_at": s["started_at"].isoformat(),
+                "expires_at": s["expires_at"].isoformat(),
+                "closed_at": s["closed_at"].isoformat()
+                if s["closed_at"]
+                else None,
+                "active": s["active"],
+                "present": int(s["present"]),
+                "absent": int(s["absent"]),
+            }
+            for s in sessions
+        ],
+    }
+
+
+@app.get("/attendance/summary")
+def attendance_summary(
+    subject: str = Query(...),
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+):
+    if subject not in SUBJECTS:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    close_expired_sessions()
+
+    start = _parse_date(from_date, "from")
+    end = _parse_date(to_date, "to")
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            rows = _semester_rows(cur, subject, start, end)
+
+    return {
+        "subject": subject,
+        "staff": SUBJECTS[subject],
+        "from": start.isoformat() if start else None,
+        "to": end.isoformat() if end else None,
+        "students": rows,
+    }
 
 
 # ============================================================
-
 # CLOSE ATTENDANCE MANUALLY
-
 # ============================================================
-
 
 
 @app.post("/attendance/close")
-
 def close_attendance(
-
     subject: str = Query(...),
-
+    password: Optional[str] = Query(None),
 ):
+    if password is not None:
+        account = _staff_account(SUBJECTS.get(subject, ""))
+        if account and not verify_password(password, account["password_hash"])[0]:
+            raise HTTPException(status_code=401, detail="Incorrect password.")
 
     close_expired_sessions()
 
-
-
     with get_connection() as conn:
-
         with conn.cursor() as cur:
-
             cur.execute(
-
                 """
-
                 SELECT *
-
                 FROM attendance_sessions
-
-                WHERE subject = %s
-
-                  AND active = TRUE
-
+                WHERE subject = %s AND active = TRUE
                 ORDER BY started_at DESC
-
                 LIMIT 1
-
                 FOR UPDATE
-
                 """,
-
                 (subject,),
-
             )
-
-
-
             session = cur.fetchone()
-
-
-
             if not session:
-
                 raise HTTPException(
-
-                    status_code=404,
-
-                    detail="No active session found.",
-
+                    status_code=404, detail="No active session found."
                 )
-
-
 
             current = now_utc()
-
-
-
             cur.execute(
-
                 """
-
                 UPDATE attendance_sessions
-
-                SET active = FALSE,
-
-                    closed_at = %s
-
+                SET active = FALSE, closed_at = %s
                 WHERE id = %s
-
                 """,
-
-                (
-
-                    current,
-
-                    session["id"],
-
-                ),
-
+                (current, session["id"]),
             )
-
-
-
-            # Immediately finalize everyone who never marked Present.
 
             cur.execute(
-
                 """
-
                 INSERT INTO attendance_records
-
                 (
-
-                    session_id,
-
-                    sno,
-
-                    subject,
-
-                    period,
-
-                    attendance_date,
-
-                    marked_at,
-
-                    status
-
+                    session_id, sno, subject, period,
+                    attendance_date, marked_at, status
                 )
-
-                SELECT
-
-                    %s,
-
-                    s.sno,
-
-                    %s,
-
-                    %s,
-
-                    %s,
-
-                    NULL,
-
-                    'Absent'
-
+                SELECT %s, s.sno, %s, %s, %s, NULL, 'Absent'
                 FROM students s
-
                 WHERE NOT EXISTS (
-
                     SELECT 1
-
                     FROM attendance_records ar
-
                     WHERE ar.session_id = %s
-
                       AND ar.sno = s.sno
-
                       AND ar.status = 'Present'
-
                 )
-
-                ON CONFLICT (session_id, sno)
-
-                DO NOTHING
-
+                ON CONFLICT (session_id, sno) DO NOTHING
                 """,
-
                 (
-
                     session["id"],
-
                     session["subject"],
-
                     session["period"],
-
                     session["started_at"].date(),
-
                     session["id"],
-
                 ),
-
             )
-
-
 
         conn.commit()
 
-
-
     return {
-
         "success": True,
-
         "session_id": session["id"],
-
         "subject": session["subject"],
-
         "period": session["period"],
-
         "closed_at": current.isoformat(),
-
     }
 
 
-
-
-
 # ============================================================
-
 # STUDENT HISTORY
-
 # ============================================================
-
 
 
 @app.get("/attendance/history/{sno}")
-
 def attendance_history(sno: str):
-
     if sno not in STUDENTS:
-
-        raise HTTPException(
-
-            status_code=404,
-
-            detail="Student not found.",
-
-        )
-
-
+        raise HTTPException(status_code=404, detail="Student not found.")
 
     close_expired_sessions()
 
-
-
     with get_connection() as conn:
-
         with conn.cursor() as cur:
-
             cur.execute(
-
                 """
-
-                SELECT
-
-                    sno,
-
-                    subject,
-
-                    period,
-
-                    attendance_date,
-
-                    marked_at,
-
-                    status
-
+                SELECT sno, subject, period, attendance_date, marked_at, status
                 FROM attendance_records
-
                 WHERE sno = %s
-
-                ORDER BY
-
-                    attendance_date DESC,
-
-                    session_id DESC
-
+                ORDER BY attendance_date DESC, session_id DESC
                 """,
-
                 (sno,),
-
             )
-
-
-
             records = cur.fetchall()
 
-
-
     for record in records:
-
-        record["attendance_date"] = (
-
-            record["attendance_date"].isoformat()
-
-        )
-
-
-
+        record["attendance_date"] = record["attendance_date"].isoformat()
         if record["marked_at"] is not None:
+            record["marked_at"] = record["marked_at"].isoformat()
 
-            record["marked_at"] = (
-
-                record["marked_at"].isoformat()
-
-            )
-
-
-
-    return {
-
-        "sno": sno,
-
-        "name": STUDENTS[sno],
-
-        "records": records,
-
-    }
-
-
-
+    return {"sno": sno, "name": STUDENTS[sno], "records": records}
 
 
 # ============================================================
-
-# STUDENT PASSWORD
-
+# STUDENT ACCOUNTS
 # ============================================================
 
 
-
-class StudentPasswordRequest(BaseModel):
-
+class StudentSetupRequest(BaseModel):
     registration_last4: str
+    password: str
+    email: str
 
+
+class StudentLoginRequest(BaseModel):
+    registration_last4: str
     password: str
 
 
+class PasswordResetRequest(BaseModel):
+    registration_last4: str
 
+
+class PasswordResetConfirm(BaseModel):
+    registration_last4: str
+    code: str
+    new_password: str
 
 
 @app.post("/student/set-password")
-
-def set_student_password(request: StudentPasswordRequest):
-
+def set_student_password(request: StudentSetupRequest):
     sno = sno_from_registration_last4(request.registration_last4)
 
-    if len(request.password) < 4:
+    if len(request.password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must contain at least {MIN_PASSWORD_LENGTH} characters.",
+        )
 
-        raise HTTPException(status_code=400, detail="Password must contain at least 4 characters.")
-
-
-
-    password_hash = hash_password(request.password)
-
-
+    email = (request.email or "").strip().lower()
+    if not EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
 
     with get_connection() as conn:
-
         with conn.cursor() as cur:
-
             cur.execute("SELECT sno FROM student_passwords WHERE sno = %s", (sno,))
-
             if cur.fetchone():
-
-                raise HTTPException(status_code=409, detail="Password already created for this student.")
-
+                raise HTTPException(
+                    status_code=409,
+                    detail="Password already created for this student.",
+                )
             cur.execute(
-
-                "INSERT INTO student_passwords (sno, password_hash) VALUES (%s, %s)",
-
-                (sno, password_hash),
-
+                """
+                INSERT INTO student_passwords (sno, password_hash, email)
+                VALUES (%s, %s, %s)
+                """,
+                (sno, hash_password(request.password), email),
             )
-
         conn.commit()
 
-
-
     return {"success": True, "sno": sno, "name": STUDENTS[sno]}
-
-
-
 
 
 @app.post("/student/login")
-
-def student_login(request: StudentPasswordRequest):
-
+def student_login(request: StudentLoginRequest):
     sno = sno_from_registration_last4(request.registration_last4)
-
-
+    rate_limit(f"student-login:{sno}", limit=10, window_seconds=300)
 
     with get_connection() as conn:
-
         with conn.cursor() as cur:
-
-            cur.execute("SELECT password_hash FROM student_passwords WHERE sno = %s", (sno,))
-
+            cur.execute(
+                "SELECT password_hash FROM student_passwords WHERE sno = %s",
+                (sno,),
+            )
             record = cur.fetchone()
 
-
-
     if not record:
-
         raise HTTPException(status_code=404, detail="Password not created yet.")
 
-
-
-    if not secrets.compare_digest(hash_password(request.password), record["password_hash"]):
-
+    valid, needs_rehash = verify_password(
+        request.password, record["password_hash"]
+    )
+    if not valid:
         raise HTTPException(status_code=401, detail="Incorrect password.")
 
-
+    if needs_rehash:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE student_passwords SET password_hash = %s WHERE sno = %s",
+                    (hash_password(request.password), sno),
+                )
+            conn.commit()
 
     return {"success": True, "sno": sno, "name": STUDENTS[sno]}
 
 
-
-
-
-# ============================================================
-
-# EXCEL EXPORT
-
-# ============================================================
-
-
-
-@app.get("/attendance/export")
-
-def export_attendance(
-
-    subject: Optional[str] = None,
-
-    date: Optional[str] = None,
-
-):
-
-    close_expired_sessions()
-
-
-
-    workbook = Workbook()
-
-    sheet = workbook.active
-
-    sheet.title = "Attendance"
-
-
-
-    sheet.append(
-
-        [
-
-            "S.No.",
-
-            "Name",
-
-            "Date",
-
-            "Subject",
-
-            "Period",
-
-            "Status",
-
-            "Marked At",
-
-        ]
-
-    )
-
-
-
-    with get_connection() as conn:
-
-        with conn.cursor() as cur:
-
-            query = """
-
-                SELECT
-
-                    ar.sno,
-
-                    s.name,
-
-                    ar.attendance_date,
-
-                    ar.subject,
-
-                    ar.period,
-
-                    ar.status,
-
-                    ar.marked_at
-
-                FROM attendance_records ar
-
-                JOIN students s
-
-                  ON s.sno = ar.sno
-
-                WHERE 1 = 1
-
-            """
-
-
-
-            params: list[str] = []
-
-
-
-            if subject:
-
-                query += " AND ar.subject = %s"
-
-                params.append(subject)
-
-
-
-            if date:
-
-                query += " AND ar.attendance_date = %s"
-
-                params.append(date)
-
-
-
-            query += """
-
-                ORDER BY
-
-                    ar.sno::INTEGER ASC,
-
-                    ar.attendance_date ASC,
-
-                    ar.session_id ASC
-
-            """
-
-
-
-            cur.execute(query, params)
-
-            rows = cur.fetchall()
-
-
-
-    for row in rows:
-
-        sheet.append(
-
-            [
-
-                int(row["sno"]),
-
-                row["name"],
-
-                row["attendance_date"].isoformat(),
-
-                row["subject"],
-
-                row["period"],
-
-                row["status"],
-
-                (
-
-                    row["marked_at"].isoformat()
-
-                    if row["marked_at"]
-
-                    else ""
-
-                ),
-
-            ]
-
-        )
-
-
-
-    output = BytesIO()
-
-    workbook.save(output)
-
-    output.seek(0)
-
-
-
-    return StreamingResponse(
-
-        output,
-
-        media_type=(
-
-            "application/vnd.openxmlformats-officedocument."
-
-            "spreadsheetml.sheet"
-
+def _mask_email(email: str) -> str:
+    try:
+        name, domain = email.split("@", 1)
+    except ValueError:
+        return "your registered email"
+    if len(name) <= 2:
+        masked = name[0] + "*"
+    else:
+        masked = name[0] + "*" * (len(name) - 2) + name[-1]
+    return f"{masked}@{domain}"
+
+
+@app.post("/student/request-password-reset")
+def request_password_reset(request: PasswordResetRequest):
+    # Never reveal whether an account exists.
+    generic = {
+        "success": True,
+        "message": (
+            "If an account exists and has an email on file, a reset code "
+            "has been sent."
         ),
+        "email": None,
+    }
 
-        headers={
+    try:
+        sno = sno_from_registration_last4(request.registration_last4)
+    except HTTPException:
+        return generic
 
-            "Content-Disposition":
-
-                'attachment; filename="attendance.xlsx"'
-
-        },
-
-    )
-
-
-
-
-
-# ============================================================
-
-# DEVELOPMENT-ONLY RESET
-
-# ============================================================
-
-
-
-@app.delete("/development/reset-database")
-
-def development_reset_database():
-
-    """
-
-    Development helper only.
-
-    DO NOT expose this endpoint in a real deployment.
-
-    """
+    rate_limit(f"reset:{sno}", limit=5, window_seconds=600)
 
     with get_connection() as conn:
-
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT email FROM student_passwords WHERE sno = %s", (sno,)
+            )
+            record = cur.fetchone()
+
+            if not record or not record["email"]:
+                return generic
+
+            email = record["email"]
+
+            # Enforce a short resend cooldown.
+            cur.execute(
+                """
+                SELECT created_at
+                FROM verification_codes
+                WHERE user_type = 'student'
+                  AND user_id = %s
+                  AND used = FALSE
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (sno,),
+            )
+            recent = cur.fetchone()
+            if recent is not None:
+                age = (now_utc() - recent["created_at"]).total_seconds()
+                if age < VERIFICATION_RESEND_SECONDS:
+                    return {
+                        "success": True,
+                        "message": "A reset code was already sent. Please check your email.",
+                        "email": _mask_email(email),
+                        "retry_after_seconds": int(
+                            VERIFICATION_RESEND_SECONDS - age
+                        ),
+                    }
 
             cur.execute(
-
-                "TRUNCATE attendance_records, "
-
-                "attendance_codes, attendance_sessions, "
-
-                "attendance_device_locks, student_passwords, verification_codes "
-
-                "RESTART IDENTITY CASCADE"
-
+                """
+                UPDATE verification_codes
+                SET used = TRUE
+                WHERE user_type = 'student'
+                  AND user_id = %s
+                  AND used = FALSE
+                """,
+                (sno,),
             )
 
-
-
+            code = make_code()
+            expires_at = now_utc() + timedelta(
+                minutes=VERIFICATION_CODE_MINUTES
+            )
+            cur.execute(
+                """
+                INSERT INTO verification_codes
+                (user_type, user_id, verification_code, expires_at)
+                VALUES ('student', %s, %s, %s)
+                """,
+                (sno, code, expires_at),
+            )
         conn.commit()
 
-
+    send_email(
+        email,
+        "Your attendance app password reset code",
+        (
+            f"Hello {STUDENTS.get(sno, 'Student')},\n\n"
+            f"Your password reset code is: {code}\n\n"
+            f"It expires in {VERIFICATION_CODE_MINUTES} minutes. "
+            "If you did not request this, you can ignore this email.\n\n"
+            "College Attendance"
+        ),
+    )
 
     return {
-
         "success": True,
-
-        "message": "Development attendance data reset.",
-
+        "message": "A reset code has been sent to your email.",
+        "email": _mask_email(email),
     }
 
 
-class StudentPasswordResetRequest(BaseModel):
-    password: str
+@app.post("/student/reset-password")
+def reset_student_password(request: PasswordResetConfirm):
+    sno = sno_from_registration_last4(request.registration_last4)
 
-
-@app.post("/admin/reset-mohammed-jasim-password")
-def reset_mohammed_jasim_password(request: StudentPasswordResetRequest):
-    sno = "172"
-
-    if STUDENTS.get(sno) != "MOHAMED JASIM M R":
-        raise HTTPException(
-            status_code=500,
-            detail="Mohammed Jasim record is not configured as expected."
-        )
-
-    if len(request.password) < 4:
+    if len(request.new_password) < MIN_PASSWORD_LENGTH:
         raise HTTPException(
             status_code=400,
-            detail="Password must contain at least 4 characters."
+            detail=f"Password must contain at least {MIN_PASSWORD_LENGTH} characters.",
         )
 
-    password_hash = hash_password(request.password)
+    rate_limit(f"reset-confirm:{sno}", limit=10, window_seconds=600)
+
+    code = (request.code or "").strip()
 
     with get_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, verification_code, expires_at
+                FROM verification_codes
+                WHERE user_type = 'student'
+                  AND user_id = %s
+                  AND used = FALSE
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (sno,),
+            )
+            record = cur.fetchone()
+
+            if not record:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No active reset code. Please request a new one.",
+                )
+
+            if record["expires_at"] <= now_utc():
+                raise HTTPException(
+                    status_code=400,
+                    detail="This reset code has expired. Please request a new one.",
+                )
+
+            if not secrets.compare_digest(record["verification_code"], code):
+                raise HTTPException(status_code=401, detail="Incorrect reset code.")
+
+            cur.execute(
+                "UPDATE verification_codes SET used = TRUE WHERE id = %s",
+                (record["id"],),
+            )
             cur.execute(
                 """
                 INSERT INTO student_passwords (sno, password_hash)
@@ -3104,14 +1917,221 @@ def reset_mohammed_jasim_password(request: StudentPasswordResetRequest):
                 ON CONFLICT (sno)
                 DO UPDATE SET password_hash = EXCLUDED.password_hash
                 """,
-                (sno, password_hash),
+                (sno, hash_password(request.new_password)),
             )
         conn.commit()
 
+    return {"success": True, "sno": sno, "name": STUDENTS[sno]}
+
+
+# ============================================================
+# EXPORT (per-student semester summary)
+# ============================================================
+
+
+def _build_summary_workbook(subject: str, start=None, end=None) -> BytesIO:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Attendance Summary"
+
+    sheet.append(
+        [
+            "S.No.",
+            "Name",
+            "Subject",
+            "Present",
+            "Absent",
+            "Total",
+            "Percentage",
+        ]
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            rows = _semester_rows(cur, subject, start, end)
+
+    for row in rows:
+        sheet.append(
+            [
+                int(row["sno"]),
+                row["name"],
+                subject,
+                row["present"],
+                row["absent"],
+                row["total"],
+                row["percentage"],
+            ]
+        )
+
+    output = BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
+def _safe_filename(subject: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", subject).strip("_").lower()
+    return f"attendance_{cleaned or 'subject'}.xlsx"
+
+
+@app.get("/attendance/export")
+def export_attendance(
+    subject: str = Query(...),
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+):
+    if subject not in SUBJECTS:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    close_expired_sessions()
+
+    start = _parse_date(from_date, "from")
+    end = _parse_date(to_date, "to")
+
+    output = _build_summary_workbook(subject, start, end)
+    filename = _safe_filename(subject)
+
+    return StreamingResponse(
+        output,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ============================================================
+# ERP UPDATE
+# ============================================================
+
+
+def _push_to_erp(subject: str, filename: str, data: bytes) -> tuple[bool, str]:
+    if ERP_MODE == "api" and ERP_API_URL:
+        import json
+        import urllib.request
+
+        request = urllib.request.Request(
+            ERP_API_URL,
+            data=data,
+            method="POST",
+            headers={
+                "Content-Type": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                "X-Subject": subject,
+                "X-Filename": filename,
+                "Authorization": f"Bearer {ERP_API_KEY}" if ERP_API_KEY else "",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                body = response.read().decode("utf-8", "replace")
+                return 200 <= response.status < 300, body[:500]
+        except Exception as exc:  # pragma: no cover - network dependent
+            return False, str(exc)
+
+    # file mode: email the workbook to the college ERP address.
+    if not ERP_UPLOAD_EMAIL:
+        return False, "ERP_UPLOAD_EMAIL is not configured."
+
+    sent = send_email(
+        ERP_UPLOAD_EMAIL,
+        f"Attendance update - {subject}",
+        (
+            f"Attached is the semester attendance summary for {subject}.\n\n"
+            "Generated by the College Attendance app."
+        ),
+        attachment=(filename, data),
+    )
+    return sent, "emailed" if sent else "email failed"
+
+
+@app.post("/attendance/erp-update")
+def erp_update(
+    subject: str = Query(...),
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+):
+    if subject not in SUBJECTS:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    close_expired_sessions()
+
+    start = _parse_date(from_date, "from")
+    end = _parse_date(to_date, "to")
+
+    output = _build_summary_workbook(subject, start, end)
+    data = output.getvalue()
+    filename = _safe_filename(subject)
+
+    ok, detail = _push_to_erp(subject, filename, data)
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO erp_sync_log
+                (
+                    subject, mode, period_start, period_end,
+                    student_count, recipients, status, detail
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    subject,
+                    ERP_MODE,
+                    start,
+                    end,
+                    len(STUDENTS),
+                    ERP_UPLOAD_EMAIL if ERP_MODE != "api" else ERP_API_URL,
+                    "success" if ok else "failed",
+                    detail,
+                ),
+            )
+        conn.commit()
+
+    if not ok:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not deliver to the ERP ({detail}). "
+            "You can still download the Excel file.",
+        )
+
     return {
         "success": True,
-        "sno": sno,
-        "name": STUDENTS[sno],
-        "message": "Mohammed Jasim's password has been reset successfully."
+        "subject": subject,
+        "mode": ERP_MODE,
+        "delivered_to": ERP_UPLOAD_EMAIL
+        if ERP_MODE != "api"
+        else ERP_API_URL,
+        "filename": filename,
+        "students": len(STUDENTS),
     }
 
+
+# ============================================================
+# DEVELOPMENT-ONLY RESET (disabled unless RESET_DB_ENABLED=true)
+# ============================================================
+
+
+@app.delete("/development/reset-database")
+def development_reset_database():
+    if not RESET_DB_ENABLED:
+        raise HTTPException(
+            status_code=403,
+            detail="Reset is disabled. Set RESET_DB_ENABLED=true to allow it.",
+        )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "TRUNCATE attendance_records, attendance_codes, "
+                "attendance_sessions, attendance_device_locks, "
+                "student_passwords, verification_codes, erp_sync_log "
+                "RESTART IDENTITY CASCADE"
+            )
+        conn.commit()
+
+    return {"success": True, "message": "Development attendance data reset."}
