@@ -110,27 +110,35 @@ and a warning is logged instead.
 
 ## Staff passwords
 
-On first startup the backend creates one account per staff member with a
-random password and logs it:
+Staff choose their own password. The backend creates one account per staff
+member **with no password at all**, so nothing secret is ever written to the
+logs — the only staff line you will see is:
 
 ```
-WARNING:attendance:[staff-init] Ms. S. Saranya initial password: Svce@67fa3e (must be changed on first login)
+[staff-setup] Ms. S. Saranya chose their own password
 ```
 
-Collect those from the AppSail logs and hand them out. Each staff member is
-asked to set their own password the first time they sign in.
+A staff member opens the portal, picks *First time? Create your password*,
+chooses their subject, and enters the college's setup code plus a password of
+their own. That code is `STAFF_SETUP_CODE`; set it in the AppSail environment
+variables (and in `.env` for local runs) and hand it out to staff. While it is
+unset, self-service is switched off and the page answers **503**.
 
-If those lines have already rolled off the console logs, reset them:
+The code only works while an account has no password, so it cannot be used to
+take over an account that is already in use. Signing in to an account that has no
+password yet returns **409**, which is how the app knows to offer the setup page.
+
+If a staff member forgets their password, clear it and they can set a new one
+with the same code:
 
 ```powershell
-venv\Scripts\python reset_staff_passwords.py            # prints the host, asks to confirm
-venv\Scripts\python reset_staff_passwords.py --yes
-venv\Scripts\python reset_staff_passwords.py --staff "Ms. S. Saranya"
+venv\Scripts\python clear_staff_passwords.py            # prints the host, asks to confirm
+venv\Scripts\python clear_staff_passwords.py --yes
+venv\Scripts\python clear_staff_passwords.py --staff "Ms. S. Saranya"
 ```
 
-It reuses the app's own hashing, so the result is identical to the original
-seeding, and it resolves the database the same way the app does (`.env`, then
-`.env.local`). Check the host it prints before confirming.
+It resolves the database the same way the app does (`.env`, then `.env.local`,
+then real environment variables). Check the host it prints before confirming.
 
 ## Local development
 

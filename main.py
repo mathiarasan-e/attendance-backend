@@ -66,7 +66,7 @@ def _load_env_files(*paths: str) -> None:
     Later files win over earlier ones, so .env.local overrides .env. Anything
     already set in the process environment beats all of them, which keeps a
     deployed container authoritative and lets a one-off command such as
-    `$env:DATABASE_URL=...; python reset_staff_passwords.py` win locally.
+    `$env:DATABASE_URL=...; python clear_staff_passwords.py` win locally.
     """
     real_env = set(os.environ)
     merged: dict = {}
@@ -130,6 +130,12 @@ RESET_DB_ENABLED = os.getenv("RESET_DB_ENABLED", "").lower() in {
     "true",
     "yes",
 }
+
+# Staff choose their own password the first time they sign in, and must type this
+# code to do it. The college hands the code out to staff; changing it here simply
+# retires the old one. While it is empty, self-service setup is switched off and
+# only an administrator can clear an account.
+STAFF_SETUP_CODE = os.getenv("STAFF_SETUP_CODE", "").strip()
 
 ALLOWED_ORIGINS = [
     origin.strip()
@@ -431,11 +437,19 @@ def init_database() -> None:
                 """
                 CREATE TABLE IF NOT EXISTS staff_accounts (
                     staff_name TEXT PRIMARY KEY,
-                    password_hash TEXT NOT NULL,
+                    password_hash TEXT,
                     must_change BOOLEAN NOT NULL DEFAULT TRUE,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
                 """
+            )
+
+            # A staff account starts with no password: the staff member sets
+            # their own the first time they sign in. Deployments that predate
+            # that created the column NOT NULL, so drop the constraint. Running
+            # this again is a no-op and no data is touched.
+            cur.execute(
+                "ALTER TABLE staff_accounts ALTER COLUMN password_hash DROP NOT NULL"
             )
 
             cur.execute(
@@ -622,27 +636,19 @@ def init_database() -> None:
                     row["sno"],
                 )
 
-            # Seed one account per staff member with a unique random password.
+            # One account per staff member, created with no password at all.
+            # Each staff member sets their own the first time they sign in, so
+            # nothing secret is ever written to the logs. DO NOTHING leaves an
+            # account that has already been claimed exactly as it is.
             for staff_name in sorted(set(SUBJECTS.values())):
-                cur.execute(
-                    "SELECT 1 FROM staff_accounts WHERE staff_name = %s",
-                    (staff_name,),
-                )
-                if cur.fetchone():
-                    continue
-                initial_password = "Svce@" + secrets.token_hex(3)
                 cur.execute(
                     """
                     INSERT INTO staff_accounts
                         (staff_name, password_hash, must_change)
-                    VALUES (%s, %s, TRUE)
+                    VALUES (%s, NULL, TRUE)
+                    ON CONFLICT (staff_name) DO NOTHING
                     """,
-                    (staff_name, hash_password(initial_password)),
-                )
-                log.warning(
-                    "[staff-init] %s initial password: %s (must be changed on first login)",
-                    staff_name,
-                    initial_password,
+                    (staff_name,),
                 )
 
         conn.commit()
@@ -987,6 +993,12 @@ class StaffChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class StaffSetupRequest(BaseModel):
+    subject: str
+    setup_code: str
+    new_password: str
+
+
 def _staff_account(staff_name: str):
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -995,6 +1007,71 @@ def _staff_account(staff_name: str):
                 (staff_name,),
             )
             return cur.fetchone()
+
+
+@app.post("/staff/set-password")
+def set_staff_password(request: StaffSetupRequest):
+    """First-time setup: a staff member chooses their own password.
+
+    The college hands out ``STAFF_SETUP_CODE`` to staff, and the account must
+    still have no password, so this cannot be used to take over an account that
+    someone is already using.
+    """
+    subject = request.subject.strip()
+    if subject not in SUBJECTS:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    if not STAFF_SETUP_CODE:
+        raise HTTPException(
+            status_code=503,
+            detail="Staff setup is switched off. Ask the administrator.",
+        )
+
+    if len(request.new_password) < MIN_PASSWORD_LENGTH + 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must contain at least 6 characters.",
+        )
+
+    staff_name = SUBJECTS[subject]
+    rate_limit(f"staff-setup:{staff_name}", limit=10, window_seconds=300)
+
+    if not secrets.compare_digest(
+        request.setup_code.strip().encode("utf-8"), STAFF_SETUP_CODE.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Incorrect setup code.")
+
+    account = _staff_account(staff_name)
+    if not account:
+        raise HTTPException(
+            status_code=500, detail="Staff account is not configured."
+        )
+
+    if account["password_hash"]:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This staff account already has a password. "
+                "Sign in instead, or ask the administrator to reset it."
+            ),
+        )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE staff_accounts
+                SET password_hash = %s,
+                    must_change = FALSE,
+                    updated_at = NOW()
+                WHERE staff_name = %s
+                """,
+                (hash_password(request.new_password), staff_name),
+            )
+        conn.commit()
+
+    log.info("[staff-setup] %s chose their own password", staff_name)
+    return {"success": True, "subject": subject, "staff": staff_name}
 
 
 @app.post("/staff/verify-subject")
@@ -1011,6 +1088,15 @@ def verify_subject_password(request: StaffVerifyRequest):
         raise HTTPException(
             status_code=500,
             detail="Staff account is not configured.",
+        )
+
+    if not account["password_hash"]:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No password is set for this staff account yet. "
+                "Create one first, then sign in."
+            ),
         )
 
     valid, needs_rehash = verify_password(
@@ -1053,6 +1139,15 @@ def change_staff_password(request: StaffChangePasswordRequest):
     if not account:
         raise HTTPException(
             status_code=500, detail="Staff account is not configured."
+        )
+
+    if not account["password_hash"]:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No password is set for this staff account yet. "
+                "Create one first, then sign in."
+            ),
         )
 
     valid, _ = verify_password(request.current_password, account["password_hash"])
