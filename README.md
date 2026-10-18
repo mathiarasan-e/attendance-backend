@@ -108,6 +108,23 @@ student who already has attendance records is never deleted — `attendance_reco
 cascades on delete, so a stale name is preferable to silently losing history —
 and a warning is logged instead.
 
+Because every attendance table is keyed by `s.no`, changing the roster renumbers
+the data with it: a row written for s.no `121` now describes whoever holds `121`.
+So when a student leaves, or the class is renumbered, clear the attendance data
+and let the sync finish the job:
+
+```powershell
+venv\Scripts\python clear_attendance_data.py                              # asks to confirm
+venv\Scripts\python clear_attendance_data.py --yes
+venv\Scripts\python clear_attendance_data.py --yes --student-passwords
+```
+
+It deletes the attendance tables first (that is what unblocks the delete above),
+then calls the same `init_database()` the service uses, so a student who has left
+really is removed. It prints the target host and the row counts before touching
+anything. Pass `--student-passwords` to also delete every student password and
+pending reset code, so all students create their own again.
+
 ## Staff passwords
 
 Staff choose their own password. The backend creates one account per staff
