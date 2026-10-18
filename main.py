@@ -1618,8 +1618,7 @@ def _semester_rows(
             COALESCE(SUM(CASE WHEN ar.status = 'Present' THEN 1 ELSE 0 END), 0)
                 AS present,
             COALESCE(SUM(CASE WHEN ar.status = 'Absent' THEN 1 ELSE 0 END), 0)
-                AS absent,
-            COUNT(ar.id) AS total
+                AS absent
         FROM students s
         LEFT JOIN attendance_records ar
             ON ar.sno = s.sno
@@ -1644,16 +1643,12 @@ def _semester_rows(
     for row in rows:
         present = int(row["present"])
         absent = int(row["absent"])
-        total = int(row["total"])
-        percentage = round((present / total) * 100, 2) if total else 0.0
         result.append(
             {
                 "sno": row["sno"],
                 "name": row["name"],
                 "present": present,
                 "absent": absent,
-                "total": total,
-                "percentage": percentage,
             }
         )
     return result
@@ -1968,11 +1963,8 @@ def _build_summary_workbook(subject: str, start=None, end=None) -> BytesIO:
         [
             "S.No.",
             "Name",
-            "Subject",
             "Present",
             "Absent",
-            "Total",
-            "Percentage",
         ]
     )
 
@@ -1985,11 +1977,8 @@ def _build_summary_workbook(subject: str, start=None, end=None) -> BytesIO:
             [
                 int(row["sno"]),
                 row["name"],
-                subject,
                 row["present"],
                 row["absent"],
-                row["total"],
-                row["percentage"],
             ]
         )
 

@@ -14,9 +14,11 @@ FastAPI + PostgreSQL service for the college attendance app.
 - **No student self-service reset.** Students remember their own password; if one
   is forgotten the college clears it and the student sets a new one
   (`clear_student_password.py`).
-- **Per-student semester summary** (`Present`, `Absent`, `Total`, `Percentage`).
+- **Per-student semester summary** (`Present`, `Absent`). The counts live in the
+  app, on the subject's report page; there is no percentage column anywhere.
 - **Pluggable ERP delivery**: generate an Excel file and email it, or (later)
-  push it to an ERP endpoint.
+  push it to an ERP endpoint. The app's "Update to ERP" button is hidden until
+  the college interface is agreed.
 - Rate limiting on login endpoints; the destructive reset endpoint is
   disabled unless `RESET_DB_ENABLED=true`.
 - Optional connection pooling via `psycopg_pool`; a per-subject active session
@@ -38,12 +40,12 @@ FastAPI + PostgreSQL service for the college attendance app.
 | GET | `/attendance/absentees` | Live absentee list for a subject |
 | GET | `/attendance/absentee-history` | Latest session's absentee list |
 | GET | `/attendance/sessions` | All sessions for a subject |
-| GET | `/attendance/summary` | Per-student semester summary |
+| GET | `/attendance/summary` | Per-student semester summary (present/absent counts) |
 | POST | `/attendance/close` | End a session now |
 | GET | `/attendance/history/{sno}` | One student's records |
 | POST | `/student/set-password` | First-time student setup |
 | POST | `/student/login` | Student login |
-| GET | `/attendance/export` | Download the summary as `.xlsx` |
+| GET | `/attendance/export` | Download the summary as `.xlsx` (S.No, Name, Present, Absent) |
 | POST | `/attendance/erp-update` | Generate + deliver the summary to the ERP |
 
 ## Serving the web app
@@ -251,8 +253,13 @@ managed runtime path above does not use it.
 ## ERP integration
 
 `ERP_MODE=file` (the default) builds a one-sheet Excel summary — S.No, Name,
-Subject, Present, Absent, Total, Percentage — and emails it to
-`ERP_UPLOAD_EMAIL`. Staff can also download the same file from the app.
+Present, Absent — and emails it to `ERP_UPLOAD_EMAIL`. Staff can also download
+the same file from the app, from the subject's report page.
+
+The report page is where the semester record is kept, per subject. Its Download
+button only unlocks once at least one session has finished and none is still
+running, so a sheet cannot be pulled halfway through a class; while it locked
+the page re-checks every 30 seconds and unlocks itself.
 
 When the college ERP interface is known, set `ERP_MODE=api`, `ERP_API_URL` and
 `ERP_API_KEY`; no app change is needed. Every attempt is recorded in
