@@ -11,11 +11,13 @@ FastAPI + PostgreSQL service for the college attendance app.
   subject passwords shared by several people.
 - **Attendance data is never hidden after a time window.** A session's records
   stay for the whole semester. There is a new semester report.
-- **Email password reset** with a 6-digit code (`student_passwords.email`).
+- **No student self-service reset.** Students remember their own password; if one
+  is forgotten the college clears it and the student sets a new one
+  (`clear_student_password.py`).
 - **Per-student semester summary** (`Present`, `Absent`, `Total`, `Percentage`).
 - **Pluggable ERP delivery**: generate an Excel file and email it, or (later)
   push it to an ERP endpoint.
-- Rate limiting on login and reset endpoints; the destructive reset endpoint is
+- Rate limiting on login endpoints; the destructive reset endpoint is
   disabled unless `RESET_DB_ENABLED=true`.
 - Optional connection pooling via `psycopg_pool`; a per-subject active session
   lookup; and a wider (120 m) classroom radius for browser GPS.
@@ -39,10 +41,8 @@ FastAPI + PostgreSQL service for the college attendance app.
 | GET | `/attendance/summary` | Per-student semester summary |
 | POST | `/attendance/close` | End a session now |
 | GET | `/attendance/history/{sno}` | One student's records |
-| POST | `/student/set-password` | First-time student setup (+ email) |
+| POST | `/student/set-password` | First-time student setup |
 | POST | `/student/login` | Student login |
-| POST | `/student/request-password-reset` | Email a 6-digit reset code |
-| POST | `/student/reset-password` | Set a new password with the code |
 | GET | `/attendance/export` | Download the summary as `.xlsx` |
 | POST | `/attendance/erp-update` | Generate + deliver the summary to the ERP |
 
@@ -83,8 +83,9 @@ environment. Everything has a safe default except `DATABASE_URL`.
 | `ERP_API_URL` / `ERP_API_KEY` | Used when `ERP_MODE=api` |
 | `RESET_DB_ENABLED` | Enables `DELETE /development/reset-database` |
 
-If `SMTP_HOST` is not set, emails are written to the log instead of sent, and
-`request-password-reset` still returns success (so the flow stays testable).
+`SMTP_HOST` and `SMTP_FROM` are only needed by `ERP_MODE=file`, which emails the
+semester summary. Nothing else sends mail. If they are unset the message is
+written to the log instead of sent.
 
 ## Students and login
 
@@ -122,8 +123,20 @@ venv\Scripts\python clear_attendance_data.py --yes --student-passwords
 It deletes the attendance tables first (that is what unblocks the delete above),
 then calls the same `init_database()` the service uses, so a student who has left
 really is removed. It prints the target host and the row counts before touching
-anything. Pass `--student-passwords` to also delete every student password and
-pending reset code, so all students create their own again.
+anything. Pass `--student-passwords` to also delete every student password, so
+all students create their own again.
+
+## Student passwords
+
+Students create their own password the first time they sign in, and are told
+plainly to remember it: there is no reset email and no reset code. When one is
+forgotten, clear it and the student sets a new one from the same page:
+
+```powershell
+venv\Scripts\python clear_student_password.py 0398     # by admission last 4 digits
+venv\Scripts\python clear_student_password.py 124      # by s.no
+venv\Scripts\python clear_student_password.py --all --yes
+```
 
 ## Staff passwords
 

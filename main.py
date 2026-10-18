@@ -156,9 +156,6 @@ WEB_DIR = (
 
 PBKDF2_ITERATIONS = int(os.getenv("PBKDF2_ITERATIONS", "200000"))
 
-VERIFICATION_CODE_MINUTES = int(os.getenv("VERIFICATION_CODE_MINUTES", "10"))
-VERIFICATION_RESEND_SECONDS = int(os.getenv("VERIFICATION_RESEND_SECONDS", "60"))
-
 MIN_PASSWORD_LENGTH = 4
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -550,27 +547,11 @@ def init_database() -> None:
                 """
             )
 
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS verification_codes (
-                    id BIGSERIAL PRIMARY KEY,
-                    user_type VARCHAR(20) NOT NULL,
-                    user_id TEXT NOT NULL,
-                    verification_code VARCHAR(10) NOT NULL,
-                    expires_at TIMESTAMPTZ NOT NULL,
-                    used BOOLEAN NOT NULL DEFAULT FALSE,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-                """
-            )
-
-            cur.execute(
-                """
-                CREATE INDEX IF NOT EXISTS
-                verification_codes_lookup
-                ON verification_codes (user_type, user_id, used, expires_at)
-                """
-            )
+            # Students do not reset a password themselves - remember your
+            # password is the rule, and the college clears one that is forgotten
+            # (see clear_student_password.py). The table that held emailed reset
+            # codes is dropped so no stale codes linger in a live database.
+            cur.execute("DROP TABLE IF EXISTS verification_codes")
 
             cur.execute(
                 """
@@ -1893,22 +1874,14 @@ def attendance_history(sno: str):
 class StudentSetupRequest(BaseModel):
     admission_last4: str
     password: str
-    email: str
+    # An email only ever existed to receive a reset code, and nothing sends one
+    # now. It stays optional rather than blocking sign-up on unused data.
+    email: str = ""
 
 
 class StudentLoginRequest(BaseModel):
     admission_last4: str
     password: str
-
-
-class PasswordResetRequest(BaseModel):
-    admission_last4: str
-
-
-class PasswordResetConfirm(BaseModel):
-    admission_last4: str
-    code: str
-    new_password: str
 
 
 @app.post("/student/set-password")
@@ -1922,7 +1895,7 @@ def set_student_password(request: StudentSetupRequest):
         )
 
     email = (request.email or "").strip().lower()
-    if not EMAIL_RE.match(email):
+    if email and not EMAIL_RE.match(email):
         raise HTTPException(status_code=400, detail="Enter a valid email address.")
 
     with get_connection() as conn:
@@ -1938,7 +1911,7 @@ def set_student_password(request: StudentSetupRequest):
                 INSERT INTO student_passwords (sno, password_hash, email)
                 VALUES (%s, %s, %s)
                 """,
-                (sno, hash_password(request.password), email),
+                (sno, hash_password(request.password), email or None),
             )
         conn.commit()
 
@@ -1979,180 +1952,6 @@ def student_login(request: StudentLoginRequest):
     return {"success": True, "sno": sno, "name": STUDENTS[sno]}
 
 
-def _mask_email(email: str) -> str:
-    try:
-        name, domain = email.split("@", 1)
-    except ValueError:
-        return "your registered email"
-    if len(name) <= 2:
-        masked = name[0] + "*"
-    else:
-        masked = name[0] + "*" * (len(name) - 2) + name[-1]
-    return f"{masked}@{domain}"
-
-
-@app.post("/student/request-password-reset")
-def request_password_reset(request: PasswordResetRequest):
-    # Never reveal whether an account exists.
-    generic = {
-        "success": True,
-        "message": (
-            "If an account exists and has an email on file, a reset code "
-            "has been sent."
-        ),
-        "email": None,
-    }
-
-    try:
-        sno = sno_from_admission_last4(request.admission_last4)
-    except HTTPException:
-        return generic
-
-    rate_limit(f"reset:{sno}", limit=5, window_seconds=600)
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT email FROM student_passwords WHERE sno = %s", (sno,)
-            )
-            record = cur.fetchone()
-
-            if not record or not record["email"]:
-                return generic
-
-            email = record["email"]
-
-            # Enforce a short resend cooldown.
-            cur.execute(
-                """
-                SELECT created_at
-                FROM verification_codes
-                WHERE user_type = 'student'
-                  AND user_id = %s
-                  AND used = FALSE
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (sno,),
-            )
-            recent = cur.fetchone()
-            if recent is not None:
-                age = (now_utc() - recent["created_at"]).total_seconds()
-                if age < VERIFICATION_RESEND_SECONDS:
-                    return {
-                        "success": True,
-                        "message": "A reset code was already sent. Please check your email.",
-                        "email": _mask_email(email),
-                        "retry_after_seconds": int(
-                            VERIFICATION_RESEND_SECONDS - age
-                        ),
-                    }
-
-            cur.execute(
-                """
-                UPDATE verification_codes
-                SET used = TRUE
-                WHERE user_type = 'student'
-                  AND user_id = %s
-                  AND used = FALSE
-                """,
-                (sno,),
-            )
-
-            code = make_code()
-            expires_at = now_utc() + timedelta(
-                minutes=VERIFICATION_CODE_MINUTES
-            )
-            cur.execute(
-                """
-                INSERT INTO verification_codes
-                (user_type, user_id, verification_code, expires_at)
-                VALUES ('student', %s, %s, %s)
-                """,
-                (sno, code, expires_at),
-            )
-        conn.commit()
-
-    send_email(
-        email,
-        "Your attendance app password reset code",
-        (
-            f"Hello {STUDENTS.get(sno, 'Student')},\n\n"
-            f"Your password reset code is: {code}\n\n"
-            f"It expires in {VERIFICATION_CODE_MINUTES} minutes. "
-            "If you did not request this, you can ignore this email.\n\n"
-            "College Attendance"
-        ),
-    )
-
-    return {
-        "success": True,
-        "message": "A reset code has been sent to your email.",
-        "email": _mask_email(email),
-    }
-
-
-@app.post("/student/reset-password")
-def reset_student_password(request: PasswordResetConfirm):
-    sno = sno_from_admission_last4(request.admission_last4)
-
-    if len(request.new_password) < MIN_PASSWORD_LENGTH:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Password must contain at least {MIN_PASSWORD_LENGTH} characters.",
-        )
-
-    rate_limit(f"reset-confirm:{sno}", limit=10, window_seconds=600)
-
-    code = (request.code or "").strip()
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, verification_code, expires_at
-                FROM verification_codes
-                WHERE user_type = 'student'
-                  AND user_id = %s
-                  AND used = FALSE
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (sno,),
-            )
-            record = cur.fetchone()
-
-            if not record:
-                raise HTTPException(
-                    status_code=400,
-                    detail="No active reset code. Please request a new one.",
-                )
-
-            if record["expires_at"] <= now_utc():
-                raise HTTPException(
-                    status_code=400,
-                    detail="This reset code has expired. Please request a new one.",
-                )
-
-            if not secrets.compare_digest(record["verification_code"], code):
-                raise HTTPException(status_code=401, detail="Incorrect reset code.")
-
-            cur.execute(
-                "UPDATE verification_codes SET used = TRUE WHERE id = %s",
-                (record["id"],),
-            )
-            cur.execute(
-                """
-                INSERT INTO student_passwords (sno, password_hash)
-                VALUES (%s, %s)
-                ON CONFLICT (sno)
-                DO UPDATE SET password_hash = EXCLUDED.password_hash
-                """,
-                (sno, hash_password(request.new_password)),
-            )
-        conn.commit()
-
-    return {"success": True, "sno": sno, "name": STUDENTS[sno]}
 
 
 # ============================================================
@@ -2360,7 +2159,7 @@ def development_reset_database():
             cur.execute(
                 "TRUNCATE attendance_records, attendance_codes, "
                 "attendance_sessions, attendance_device_locks, "
-                "student_passwords, verification_codes, erp_sync_log "
+                "student_passwords, erp_sync_log "
                 "RESTART IDENTITY CASCADE"
             )
         conn.commit()
