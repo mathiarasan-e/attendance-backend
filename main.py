@@ -163,137 +163,138 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # ============================================================
 
 STUDENTS: dict[str, str] = {
-    "120": "JOAN MARSALINE A",
-    "121": "JOEL S",
-    "122": "K DEVADHARSHINI",
-    "123": "K DHANANJAY",
-    "124": "K M LEKHAA VARSHINI",
-    "125": "K R HARSHINI",
-    "126": "K SHAMITHA",
-    "127": "KAILASH SURYA P",
-    "128": "KAMALA KANNAN S",
-    "129": "KAMALI S B",
-    "130": "KANISHKA A",
-    "131": "KAPILVENKAT K",
-    "132": "KARTHICK S",
-    "133": "KARTHIGA D",
-    "134": "KARTHIGA S",
-    "135": "KARUNYA G",
-    "136": "KAVINAYA J",
-    "137": "KAVIYA G",
-    "138": "KAVIYA J",
-    "139": "KEERTHANA R",
-    "140": "KEERTHANA S",
-    "141": "KESAVARAM P",
-    "142": "KIRUPANITHI S",
-    "143": "KISHORE K",
-    "144": "KRISHITHA J",
-    "145": "KRISHNA A M",
-    "146": "KRITHICK S",
-    "147": "LAKSHAYA G",
-    "148": "LAKSHAYA NAGARAJAN",
-    "149": "LAKSHIKHAA SRI B",
-    "150": "LAKSHMAN M",
-    "151": "LAKSHMI PRIYA S",
-    "152": "LALITH CHANDAR M",
-    "153": "LAURA SUSAN C",
-    "154": "LAVANYA R",
-    "155": "LIVISHARAN E",
-    "156": "LOKESH D",
-    "157": "LOKESHWARI V",
-    "158": "M GUNADHARSHINI",
-    "159": "M S ABISHIEK",
-    "160": "M YASHWANTH SAI",
-    "161": "MADHAN RAJ D",
-    "162": "MALIK KANI M K",
-    "163": "MANASA S",
-    "164": "MANSI R",
-    "165": "MATHANGI P",
-    "166": "MATHAVAN R D",
-    "167": "MATHAVAN S",
-    "168": "MATHIARASAN E",
-    "169": "MEENAKSHI A",
-    "170": "MITHRAA A",
-    "171": "MOHAMED ANEESUR RAHMAN A",
-    "172": "MOHAMED JASIM M R",
-    "173": "MOHAMMED NADEEM K S",
-    "174": "MOHANKUMAR M",
-    "175": "MOKSHITA K G",
-    "176": "MONISH V",
-    "177": "MONISHA V",
-    "178": "MOONISHHA T",
-    "179": "MOURIYA M",
-    "180": "MUGUNDHASARAVANAN D",
-    "181": "MUHAMMED JIYAD A",
-    "182": "MUKUL V P",
-    "183": "NAREN V",
+    "123": "JOEL S",
+    "124": "K DEVADHARSHINI",
+    "125": "K DHANANJAY",
+    "126": "K M LEKHAA VARSHINI",
+    "127": "K R HARSHINI",
+    "128": "K SHAMITHA",
+    "129": "KAILASH SURYA P",
+    "130": "KAMALA KANNAN S",
+    "131": "KAMALI S B",
+    "132": "KANISHKA A",
+    "133": "KAPILVENKAT K",
+    "134": "KARTHICK S",
+    "135": "KARTHIGA D",
+    "136": "KARTHIGA S",
+    "137": "KARUNYA G",
+    "138": "KAVINAYA J",
+    "139": "KAVIYA G",
+    "140": "KAVIYA J",
+    "141": "KEERTHANA R",
+    "142": "KEERTHANA S",
+    "143": "KESAVARAM P",
+    "144": "KIRUPANITHI S",
+    "145": "KISHORE K",
+    "146": "KRISHITHA J",
+    "147": "KRISHNA A M",
+    "148": "KRITHICK S",
+    "149": "LAKSHAYA G",
+    "150": "LAKSHAYA NAGARAJAN",
+    "151": "LAKSHIKHAA SRI B",
+    "152": "LAKSHMAN M",
+    "153": "LAKSHMI PRIYA S",
+    "154": "LALITH CHANDAR M",
+    "155": "LAURA SUSAN C",
+    "156": "LAVANYA R",
+    "157": "LIVISHARAN E",
+    "158": "LOKESH D",
+    "159": "LOKESHWARI V",
+    "160": "M GUNADHARSHINI",
+    "161": "M S ABISHIEK",
+    "162": "M YASHWANTH SAI",
+    "163": "MADHAN RAJ D",
+    "164": "MALIK KANI M K",
+    "165": "MANASA S",
+    "166": "MANSI R",
+    "167": "MATHANGI P",
+    "168": "MATHAVAN R D",
+    "169": "MATHAVAN S",
+    "170": "MATHIARASAN E",
+    "171": "MEENAKSHI A",
+    "172": "MITHRAA A",
+    "173": "MOHAMED ANEESUR RAHMAN A",
+    "174": "MOHAMED JASIM M R",
+    "175": "MOHAMMED NADEEM K S",
+    "176": "MOHANKUMAR M",
+    "177": "MOKSHITA K G",
+    "178": "MONISH V",
+    "179": "MONISHA V",
+    "180": "MOONISHHA T",
+    "181": "MOURIYA M",
+    "182": "MUGUNDHASARAVANAN D",
+    "183": "MUHAMMED JIYAD A",
+    "184": "MUKUL V P",
+    "185": "NAREN V",
 }
 
-REGISTRATION_LAST4_TO_SNO: dict[str, str] = {
-    "0553": "120",
-    "1302": "121",
-    "0398": "122",
-    "0683": "123",
-    "0707": "124",
-    "1219": "125",
-    "0517": "126",
-    "0448": "127",
-    "0184": "128",
-    "0475": "129",
-    "0215": "130",
-    "0776": "131",
-    "0504": "132",
-    "0500": "133",
-    "0167": "134",
-    "1026": "135",
-    "0777": "136",
-    "0921": "137",
-    "0991": "138",
-    "0005": "139",
-    "1466": "140",
-    "1470": "141",
-    "1354": "142",
-    "0756": "143",
-    "0491": "144",
-    "0209": "145",
-    "0718": "146",
-    "1340": "147",
-    "0652": "148",
-    "1452": "149",
-    "1402": "150",
-    "1353": "151",
-    "0898": "152",
-    "0380": "153",
-    "1050": "154",
-    "0359": "155",
-    "1261": "156",
-    "0164": "157",
-    "0358": "158",
-    "0351": "159",
-    "0365": "160",
-    "0218": "161",
-    "0395": "162",
-    "0345": "163",
-    "0724": "164",
-    "0045": "165",
-    "0378": "166",
-    "0582": "167",
-    "0559": "168",
-    "0021": "169",
-    "0779": "170",
-    "0082": "171",
-    "0079": "172",
-    "0828": "173",
-    "0927": "174",
-    "1443": "175",
-    "0354": "176",
-    "0174": "177",
-    "1372": "178",
-    "0469": "179",
-    "0393": "180",
-    "1436": "181",
-    "0125": "182",
-    "0883": "183",
+# Maps the last four digits of a student's admission number
+# (2026CSxxxx) to their s.no. This is what students type to log in,
+# while the s.no is the three-digit number shown in the app.
+ADMISSION_LAST4_TO_SNO: dict[str, str] = {
+    "1302": "123",
+    "0398": "124",
+    "0683": "125",
+    "0707": "126",
+    "1219": "127",
+    "0517": "128",
+    "0448": "129",
+    "0184": "130",
+    "0475": "131",
+    "0215": "132",
+    "0776": "133",
+    "0504": "134",
+    "0500": "135",
+    "0167": "136",
+    "1026": "137",
+    "0777": "138",
+    "0921": "139",
+    "0991": "140",
+    "0005": "141",
+    "1466": "142",
+    "1470": "143",
+    "1354": "144",
+    "0756": "145",
+    "0491": "146",
+    "0209": "147",
+    "0718": "148",
+    "1340": "149",
+    "0652": "150",
+    "1452": "151",
+    "1402": "152",
+    "1353": "153",
+    "0898": "154",
+    "0380": "155",
+    "1050": "156",
+    "0359": "157",
+    "1261": "158",
+    "0164": "159",
+    "0358": "160",
+    "0351": "161",
+    "0365": "162",
+    "0218": "163",
+    "0395": "164",
+    "0345": "165",
+    "0724": "166",
+    "0045": "167",
+    "0378": "168",
+    "0582": "169",
+    "0559": "170",
+    "0021": "171",
+    "0779": "172",
+    "0082": "173",
+    "0079": "174",
+    "0828": "175",
+    "0927": "176",
+    "1443": "177",
+    "0354": "178",
+    "0174": "179",
+    "1372": "180",
+    "0469": "181",
+    "0393": "182",
+    "1436": "183",
+    "0125": "184",
+    "0883": "185",
 }
 
 
@@ -585,6 +586,42 @@ def init_database() -> None:
                     (sno, name),
                 )
 
+            # Drop students who are no longer on the roster (a student who left
+            # the class, say) so they stop appearing in staff lists. Anyone with
+            # attendance history is kept: attendance_records cascades on delete,
+            # and silently erasing records would be worse than a stale name.
+            cur.execute(
+                """
+                DELETE FROM students
+                WHERE NOT (sno = ANY(%s))
+                  AND NOT EXISTS (
+                      SELECT 1 FROM attendance_records
+                      WHERE attendance_records.sno = students.sno
+                  )
+                RETURNING sno
+                """,
+                (list(STUDENTS),),
+            )
+            for row in cur.fetchall():
+                log.warning(
+                    "[roster] removed s.no %s - no longer on the roster", row["sno"]
+                )
+
+            cur.execute(
+                """
+                SELECT sno FROM students
+                WHERE NOT (sno = ANY(%s))
+                ORDER BY sno
+                """,
+                (list(STUDENTS),),
+            )
+            for row in cur.fetchall():
+                log.warning(
+                    "[roster] s.no %s is off the roster but has attendance "
+                    "records, so it was kept",
+                    row["sno"],
+                )
+
             # Seed one account per staff member with a unique random password.
             for staff_name in sorted(set(SUBJECTS.values())):
                 cur.execute(
@@ -729,18 +766,18 @@ def send_email(
         return False
 
 
-def sno_from_registration_last4(last4: str) -> str:
+def sno_from_admission_last4(last4: str) -> str:
     value = (last4 or "").strip()
     if not re.fullmatch(r"\d{4}", value):
         raise HTTPException(
             status_code=400,
-            detail="Enter exactly the last 4 digits of your registration number.",
+            detail="Enter exactly the last 4 digits of your admission number.",
         )
-    sno = REGISTRATION_LAST4_TO_SNO.get(value)
+    sno = ADMISSION_LAST4_TO_SNO.get(value)
     if sno is None:
         raise HTTPException(
             status_code=404,
-            detail="Registration number suffix not found.",
+            detail="Admission number not found.",
         )
     return sno
 
@@ -1759,29 +1796,29 @@ def attendance_history(sno: str):
 
 
 class StudentSetupRequest(BaseModel):
-    registration_last4: str
+    admission_last4: str
     password: str
     email: str
 
 
 class StudentLoginRequest(BaseModel):
-    registration_last4: str
+    admission_last4: str
     password: str
 
 
 class PasswordResetRequest(BaseModel):
-    registration_last4: str
+    admission_last4: str
 
 
 class PasswordResetConfirm(BaseModel):
-    registration_last4: str
+    admission_last4: str
     code: str
     new_password: str
 
 
 @app.post("/student/set-password")
 def set_student_password(request: StudentSetupRequest):
-    sno = sno_from_registration_last4(request.registration_last4)
+    sno = sno_from_admission_last4(request.admission_last4)
 
     if len(request.password) < MIN_PASSWORD_LENGTH:
         raise HTTPException(
@@ -1815,7 +1852,7 @@ def set_student_password(request: StudentSetupRequest):
 
 @app.post("/student/login")
 def student_login(request: StudentLoginRequest):
-    sno = sno_from_registration_last4(request.registration_last4)
+    sno = sno_from_admission_last4(request.admission_last4)
     rate_limit(f"student-login:{sno}", limit=10, window_seconds=300)
 
     with get_connection() as conn:
@@ -1872,7 +1909,7 @@ def request_password_reset(request: PasswordResetRequest):
     }
 
     try:
-        sno = sno_from_registration_last4(request.registration_last4)
+        sno = sno_from_admission_last4(request.admission_last4)
     except HTTPException:
         return generic
 
@@ -1962,7 +1999,7 @@ def request_password_reset(request: PasswordResetRequest):
 
 @app.post("/student/reset-password")
 def reset_student_password(request: PasswordResetConfirm):
-    sno = sno_from_registration_last4(request.registration_last4)
+    sno = sno_from_admission_last4(request.admission_last4)
 
     if len(request.new_password) < MIN_PASSWORD_LENGTH:
         raise HTTPException(

@@ -86,6 +86,28 @@ environment. Everything has a safe default except `DATABASE_URL`.
 If `SMTP_HOST` is not set, emails are written to the log instead of sent, and
 `request-password-reset` still returns success (so the flow stays testable).
 
+## Students and login
+
+The class list lives in two places that **must be kept identical**:
+
+| File | What |
+| --- | --- |
+| `main.py` | `STUDENTS` (s.no → name) and `ADMISSION_LAST4_TO_SNO` |
+| `lib/main.dart` | the `students` map |
+
+The API validates the roster from `main.py`; the app renders the welcome name and
+s.no from its own copy, so a mismatch shows the wrong student a wrong name.
+
+Students sign in with the **last four digits of their admission number**
+(`2026CSxxxx`). `ADMISSION_LAST4_TO_SNO` maps those digits to the s.no, so
+`2026CS0398` signs in as s.no `124`, which the app then displays.
+
+Every startup syncs the roster: anything added to `STUDENTS` is inserted, and
+anything no longer listed is deleted so it stops showing in staff lists. A
+student who already has attendance records is never deleted — `attendance_records`
+cascades on delete, so a stale name is preferable to silently losing history —
+and a warning is logged instead.
+
 ## Staff passwords
 
 On first startup the backend creates one account per staff member with a
