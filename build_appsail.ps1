@@ -108,6 +108,17 @@ else {
     Write-Host "    Build it with: flutter build web --release --dart-define=API_BASE_URL=<url>" -ForegroundColor Yellow
 }
 
+# Wheels sometimes ship their own C sources - psycopg-binary carries about 7 MB
+# of them. Nothing imports a .c file at runtime, and the AppSail upload is the
+# slowest and least reliable part of a deploy, so drop them.
+$cSources = @(Get-ChildItem $BuildDir -Recurse -File -Filter *.c -ErrorAction SilentlyContinue)
+if ($cSources.Count -gt 0) {
+    $cBytes = ($cSources | Measure-Object Length -Sum).Sum
+    $cSources | Remove-Item -Force
+    Write-Host ("==> Dropped {0:N1} MB of C sources from wheels" -f ($cBytes / 1MB)) `
+        -ForegroundColor DarkGray
+}
+
 Write-Host "==> Sanity checks" -ForegroundColor Cyan
 $so = Get-ChildItem $BuildDir -Recurse -Include *.so |
     Select-Object -First 1
