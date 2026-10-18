@@ -64,6 +64,44 @@ if (Test-Path (Join-Path $FlutterWebDir "index.html")) {
     $webDest = Join-Path $BuildDir "web"
     New-Item -ItemType Directory -Path $webDest | Out-Null
     Copy-Item (Join-Path $FlutterWebDir "*") $webDest -Recurse -Force
+
+    # Drop the renderers this build can never ask for. A JS (dart2js) build sets
+    # renderer="canvaskit" in web/flutter_bootstrap.js, and the loader only
+    # reaches skwasm / skwasm_heavy / wimp when that setting is "skwasm", which
+    # needs an app compiled to wasm (`flutter build web --wasm`). The
+    # webparagraph CanvasKit variant needs preferWebParagraph, which is not set,
+    # so it is unreachable as well. They total about 20 MB, and Catalyst resets
+    # the AppSail upload connection on a payload that large - trimming them is
+    # what lets the deploy through.
+    #
+    # Both remaining CanvasKit variants must stay: the loader picks
+    # chromium/ (a smaller build) on Chrome/Edge and the plain one elsewhere.
+    $canvaskitDir = Join-Path $webDest "canvaskit"
+    $trimmed = 0
+    if (Test-Path $canvaskitDir) {
+        foreach ($pattern in @("skwasm*", "wimp*")) {
+            Get-ChildItem $canvaskitDir -File -Filter $pattern -ErrorAction SilentlyContinue |
+                ForEach-Object { $trimmed += $_.Length; Remove-Item $_.FullName -Force }
+        }
+        $webParagraph = Join-Path $canvaskitDir "webparagraph"
+        if (Test-Path $webParagraph) {
+            $trimmed += (Get-ChildItem $webParagraph -Recurse -File |
+                Measure-Object Length -Sum).Sum
+            Remove-Item $webParagraph -Recurse -Force
+        }
+    }
+
+    # Fail loudly if the trim ever removes something the app actually needs.
+    foreach ($needed in @("canvaskit\canvaskit.wasm",
+                          "canvaskit\chromium\canvaskit.wasm",
+                          "main.dart.js",
+                          "index.html")) {
+        if (-not (Test-Path (Join-Path $webDest $needed))) {
+            throw "Bundle is missing $needed after trimming."
+        }
+    }
+    Write-Host ("    Trimmed unreachable renderers: {0:N1} MB" -f ($trimmed / 1MB)) `
+        -ForegroundColor DarkGray
 }
 else {
     Write-Host "==> No Flutter web build at $FlutterWebDir - deploying the API only" -ForegroundColor Yellow
