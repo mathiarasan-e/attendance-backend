@@ -110,12 +110,12 @@ CAMPUS_CENTER_LONGITUDE = float(
 CAMPUS_RADIUS_METERS = float(
     os.getenv(
         "CAMPUS_RADIUS_METERS",
-        os.getenv("MAX_ATTENDANCE_DISTANCE_METERS", "120"),
+        os.getenv("MAX_ATTENDANCE_DISTANCE_METERS", "200"),
     )
 )
 
 # Extra metres allowed outside the boundary for a noisy fix. Default is 0 so
-# the 120 m campus circle is enforced exactly; raise it only if students who
+# the 200 m campus circle is enforced exactly; raise it only if students who
 # are genuinely inside are being rejected near the edge.
 CAMPUS_ACCURACY_TOLERANCE_METERS = float(
     os.getenv("CAMPUS_ACCURACY_TOLERANCE_METERS", "0")
