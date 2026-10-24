@@ -25,7 +25,7 @@ FastAPI + PostgreSQL service for the college attendance app.
 - Rate limiting on login endpoints; the destructive reset endpoint is
   disabled unless `RESET_DB_ENABLED=true`.
 - Optional connection pooling via `psycopg_pool`; a per-subject active session
-  lookup; and a wider (120 m) classroom radius for browser GPS.
+  lookup; and a campus-wide attendance circle (120 m) for browser GPS.
 
 ## Endpoints
 
@@ -39,7 +39,7 @@ FastAPI + PostgreSQL service for the college attendance app.
 | POST | `/staff/change-password` | Staff changes own password |
 | POST | `/attendance/start` | Start a timed session for a subject |
 | GET | `/attendance/my-code/{sno}` | Student's own code |
-| POST | `/attendance/mark` | Mark present (GPS checked) |
+| POST | `/attendance/mark` | Mark present (campus GPS checked) |
 | GET | `/attendance/absentees` | Live absentee list for a subject |
 | GET | `/attendance/absentee-history` | Latest session's absentee list |
 | GET | `/attendance/sessions` | All sessions for a subject |
@@ -78,9 +78,11 @@ environment. Everything has a safe default except `DATABASE_URL`.
 | --- | --- |
 | `DATABASE_URL` | Postgres connection string (Neon). Required. |
 | `CODE_VALIDITY_MINUTES` | How long a session stays open (default 15) |
-| `MAX_ATTENDANCE_DISTANCE_METERS` | Classroom radius (default 120) |
+| `CAMPUS_CENTER_LATITUDE` / `CAMPUS_CENTER_LONGITUDE` | Centre of the campus attendance circle (default 12.987929, 79.972311) |
+| `CAMPUS_RADIUS_METERS` | Campus radius (default 120) |
+| `CAMPUS_ACCURACY_TOLERANCE_METERS` | Extra metres allowed outside the boundary for a noisy fix (default 0) |
+| `MAX_GPS_ACCURACY_METERS` | Reject fixes worse than this (default 100) |
 | `LOCATION_REQUIRED` | Require GPS coordinates (default true) |
-| `CLASSROOM_LATITUDE` / `CLASSROOM_LONGITUDE` | Classroom location |
 | `SEMESTER_START` / `SEMESTER_END` | Reporting window (informational) |
 | `ALLOWED_ORIGINS` | Comma-separated web origins (default `*`; unused when the UI is served from this origin) |
 | `WEB_DIR` | Directory of the compiled Flutter app (default `./web`) |

@@ -92,10 +92,38 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 CODE_VALIDITY_MINUTES = int(os.getenv("CODE_VALIDITY_MINUTES", "15"))
 
-# How far a student may be from the classroom and still mark attendance.
-# Widened from 60 m because browser geolocation is less precise than native.
-MAX_ATTENDANCE_DISTANCE_METERS = float(
-    os.getenv("MAX_ATTENDANCE_DISTANCE_METERS", "120")
+# The whole campus is the attendance zone. Students may mark from anywhere
+# inside this circle; the classroom itself is not checked, because browser GPS
+# cannot reliably tell one room from the next.
+CAMPUS_CENTER_LATITUDE = float(
+    os.getenv(
+        "CAMPUS_CENTER_LATITUDE",
+        os.getenv("CLASSROOM_LATITUDE", "12.987929"),
+    )
+)
+CAMPUS_CENTER_LONGITUDE = float(
+    os.getenv(
+        "CAMPUS_CENTER_LONGITUDE",
+        os.getenv("CLASSROOM_LONGITUDE", "79.972311"),
+    )
+)
+CAMPUS_RADIUS_METERS = float(
+    os.getenv(
+        "CAMPUS_RADIUS_METERS",
+        os.getenv("MAX_ATTENDANCE_DISTANCE_METERS", "120"),
+    )
+)
+
+# Extra metres allowed outside the boundary for a noisy fix. Default is 0 so
+# the 120 m campus circle is enforced exactly; raise it only if students who
+# are genuinely inside are being rejected near the edge.
+CAMPUS_ACCURACY_TOLERANCE_METERS = float(
+    os.getenv("CAMPUS_ACCURACY_TOLERANCE_METERS", "0")
+)
+
+# Fixes worse than this are too unreliable to accept at all.
+MAX_GPS_ACCURACY_METERS = float(
+    os.getenv("MAX_GPS_ACCURACY_METERS", "100")
 )
 
 LOCATION_REQUIRED = os.getenv("LOCATION_REQUIRED", "true").lower() in {
@@ -103,9 +131,6 @@ LOCATION_REQUIRED = os.getenv("LOCATION_REQUIRED", "true").lower() in {
     "true",
     "yes",
 }
-
-CLASSROOM_LATITUDE = float(os.getenv("CLASSROOM_LATITUDE", "12.9869153"))
-CLASSROOM_LONGITUDE = float(os.getenv("CLASSROOM_LONGITUDE", "79.9724422"))
 
 # Semester window (used only for the export header / reporting defaults).
 SEMESTER_START = os.getenv("SEMESTER_START")
@@ -522,6 +547,13 @@ def init_database() -> None:
                 """
             )
 
+            # Reported GPS accuracy for the mark, kept for auditing. Old rows
+            # have no value, which is fine.
+            cur.execute(
+                "ALTER TABLE attendance_records "
+                "ADD COLUMN IF NOT EXISTS accuracy_meters DOUBLE PRECISION"
+            )
+
             cur.execute(
                 """
                 CREATE INDEX IF NOT EXISTS
@@ -913,7 +945,13 @@ def _build_info() -> dict:
         "students": len(STUDENTS),
         "subjects": len(SUBJECTS),
         "code_validity_minutes": CODE_VALIDITY_MINUTES,
-        "max_distance_meters": MAX_ATTENDANCE_DISTANCE_METERS,
+        "campus": {
+            "latitude": CAMPUS_CENTER_LATITUDE,
+            "longitude": CAMPUS_CENTER_LONGITUDE,
+            "radius_meters": CAMPUS_RADIUS_METERS,
+            "accuracy_tolerance_meters": CAMPUS_ACCURACY_TOLERANCE_METERS,
+            "max_accuracy_meters": MAX_GPS_ACCURACY_METERS,
+        },
         "semester_start": SEMESTER_START,
         "semester_end": SEMESTER_END,
         "erp_mode": ERP_MODE,
@@ -1317,6 +1355,7 @@ class MarkAttendanceRequest(BaseModel):
     device_id: str = Field(min_length=8, max_length=200)
     latitude: Optional[float] = Field(default=None)
     longitude: Optional[float] = Field(default=None)
+    accuracy: Optional[float] = Field(default=None, ge=0)
 
 
 @app.post("/attendance/mark")
@@ -1387,25 +1426,48 @@ def mark_attendance(request: MarkAttendanceRequest):
                 )
 
             distance = None
+            accuracy = request.accuracy
             if LOCATION_REQUIRED:
                 if request.latitude is None or request.longitude is None:
                     raise HTTPException(
                         status_code=400, detail="Location is required."
                     )
 
+                if accuracy is not None and accuracy > MAX_GPS_ACCURACY_METERS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "GPS signal is too weak "
+                            f"(accuracy {accuracy:.0f} m). "
+                            "Move to an open area and try again."
+                        ),
+                    )
+
                 distance = distance_meters(
                     request.latitude,
                     request.longitude,
-                    CLASSROOM_LATITUDE,
-                    CLASSROOM_LONGITUDE,
+                    CAMPUS_CENTER_LATITUDE,
+                    CAMPUS_CENTER_LONGITUDE,
                 )
 
-                if distance > MAX_ATTENDANCE_DISTANCE_METERS:
+                # A noisy fix may be up to the tolerance outside the boundary
+                # and still count, so students in a building near the edge are
+                # not rejected by a few metres of drift.
+                tolerance = (
+                    min(accuracy, CAMPUS_ACCURACY_TOLERANCE_METERS)
+                    if accuracy is not None
+                    else 0.0
+                )
+                allowed_distance = CAMPUS_RADIUS_METERS + tolerance
+
+                if distance > allowed_distance:
                     raise HTTPException(
                         status_code=403,
                         detail=(
-                            "You are outside the classroom area. "
-                            f"Distance: {distance:.1f} m."
+                            "You are outside the college campus. "
+                            f"Distance from the campus centre: "
+                            f"{distance:.0f} m "
+                            f"(allowed {allowed_distance:.0f} m)."
                         ),
                     )
 
@@ -1417,9 +1479,10 @@ def mark_attendance(request: MarkAttendanceRequest):
                 (
                     session_id, sno, subject, period,
                     attendance_date, marked_at, status,
-                    latitude, longitude, distance_meters
+                    latitude, longitude, distance_meters,
+                    accuracy_meters
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, 'Present', %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, 'Present', %s, %s, %s, %s)
                 """,
                 (
                     session["id"],
@@ -1431,6 +1494,7 @@ def mark_attendance(request: MarkAttendanceRequest):
                     request.latitude,
                     request.longitude,
                     distance,
+                    accuracy,
                 ),
             )
 
