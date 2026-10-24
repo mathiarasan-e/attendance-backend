@@ -10,7 +10,7 @@ import smtplib
 import ssl
 import time
 from contextlib import asynccontextmanager, contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from io import BytesIO
 from pathlib import Path
@@ -1605,6 +1605,28 @@ def _parse_date(value: Optional[str], field: str):
         )
 
 
+def _parse_month(value: Optional[str], field: str = "month"):
+    if value is None or not value.strip():
+        return None
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m").date()
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} must be in YYYY-MM format.",
+        )
+
+
+def _next_month(month_start: date) -> date:
+    if month_start.month == 12:
+        return date(month_start.year + 1, 1, 1)
+    return date(month_start.year, month_start.month + 1, 1)
+
+
+def _month_label(month_start: date) -> str:
+    return month_start.strftime("%B %Y")
+
+
 def _semester_rows(
     cur,
     subject: str,
@@ -1742,6 +1764,200 @@ def attendance_summary(
         "to": end.isoformat() if end else None,
         "students": rows,
     }
+
+
+# ============================================================
+# MONTHLY ABSENTEES
+# ============================================================
+
+
+def _require_subject_password(subject: str, password: Optional[str]) -> None:
+    if password is None:
+        return
+    account = _staff_account(SUBJECTS[subject])
+    if account and not verify_password(password, account["password_hash"])[0]:
+        raise HTTPException(status_code=401, detail="Incorrect password.")
+
+
+def _monthly_absentee_data(
+    subject: str,
+    month_start: Optional[date] = None,
+) -> dict:
+    """Absentees for one subject, session by session, for a single month.
+
+    A student counts as absent for a session when there is no Present record
+    for it. That also covers a session that is still running, because its
+    Absent rows are only written when it closes.
+    """
+    close_expired_sessions()
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    to_char(started_at, 'YYYY-MM') AS month,
+                    COUNT(*) AS sessions
+                FROM attendance_sessions
+                WHERE subject = %s
+                GROUP BY 1
+                ORDER BY 1 DESC
+                """,
+                (subject,),
+            )
+            available_months = [
+                {
+                    "month": row["month"],
+                    "sessions": int(row["sessions"]),
+                }
+                for row in cur.fetchall()
+            ]
+
+            if month_start is None:
+                month_start = (
+                    datetime.strptime(
+                        available_months[0]["month"], "%Y-%m"
+                    ).date()
+                    if available_months
+                    else now_utc().date().replace(day=1)
+                )
+
+            month_end = _next_month(month_start)
+
+            cur.execute("SELECT COUNT(*) AS count FROM students")
+            student_count = int(cur.fetchone()["count"])
+
+            cur.execute(
+                """
+                SELECT
+                    ses.id,
+                    ses.period,
+                    ses.started_at,
+                    ses.closed_at,
+                    ses.active,
+                    COUNT(ar.id) FILTER (WHERE ar.status = 'Present')
+                        AS present
+                FROM attendance_sessions ses
+                LEFT JOIN attendance_records ar ON ar.session_id = ses.id
+                WHERE ses.subject = %s
+                  AND ses.started_at::date >= %s
+                  AND ses.started_at::date < %s
+                GROUP BY ses.id
+                ORDER BY ses.started_at ASC
+                """,
+                (subject, month_start, month_end),
+            )
+            session_rows = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT ses.id AS session_id, s.sno, s.name
+                FROM attendance_sessions ses
+                CROSS JOIN students s
+                WHERE ses.subject = %s
+                  AND ses.started_at::date >= %s
+                  AND ses.started_at::date < %s
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM attendance_records ar
+                      WHERE ar.session_id = ses.id
+                        AND ar.sno = s.sno
+                        AND ar.status = 'Present'
+                  )
+                ORDER BY ses.id ASC, s.sno::INTEGER ASC
+                """,
+                (subject, month_start, month_end),
+            )
+            absentees_by_session: dict[int, list[dict]] = {}
+            for row in cur.fetchall():
+                absentees_by_session.setdefault(row["session_id"], []).append(
+                    {"sno": row["sno"], "name": row["name"]}
+                )
+
+            cur.execute(
+                """
+                WITH month_sessions AS (
+                    SELECT id
+                    FROM attendance_sessions
+                    WHERE subject = %s
+                      AND started_at::date >= %s
+                      AND started_at::date < %s
+                )
+                SELECT
+                    s.sno,
+                    s.name,
+                    COUNT(ms.id) AS sessions,
+                    COUNT(ar.session_id) AS present
+                FROM students s
+                CROSS JOIN month_sessions ms
+                LEFT JOIN attendance_records ar
+                    ON ar.session_id = ms.id
+                   AND ar.sno = s.sno
+                   AND ar.status = 'Present'
+                GROUP BY s.sno, s.name
+                ORDER BY s.sno::INTEGER ASC
+                """,
+                (subject, month_start, month_end),
+            )
+            totals = [
+                {
+                    "sno": row["sno"],
+                    "name": row["name"],
+                    "sessions": int(row["sessions"]),
+                    "present": int(row["present"]),
+                    "absent": int(row["sessions"]) - int(row["present"]),
+                }
+                for row in cur.fetchall()
+            ]
+
+    sessions = []
+    absent_total = 0
+    for row in session_rows:
+        absentees = absentees_by_session.get(row["id"], [])
+        absent = len(absentees)
+        absent_total += absent
+        sessions.append(
+            {
+                "session_id": row["id"],
+                "date": row["started_at"].date().isoformat(),
+                "period": row["period"],
+                "started_at": row["started_at"].isoformat(),
+                "closed_at": row["closed_at"].isoformat()
+                if row["closed_at"]
+                else None,
+                "active": row["active"],
+                "present": int(row["present"]),
+                "absent": absent,
+                "absentees": absentees,
+            }
+        )
+
+    return {
+        "subject": subject,
+        "staff": SUBJECTS[subject],
+        "month": month_start.strftime("%Y-%m"),
+        "month_label": _month_label(month_start),
+        "student_count": student_count,
+        "session_count": len(sessions),
+        "absent_total": absent_total,
+        "available_months": available_months,
+        "sessions": sessions,
+        "totals": totals,
+    }
+
+
+@app.get("/attendance/monthly-absentees")
+def monthly_absentees(
+    subject: str = Query(...),
+    month: Optional[str] = Query(None),
+    password: Optional[str] = Query(None),
+):
+    if subject not in SUBJECTS:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    _require_subject_password(subject, password)
+
+    return _monthly_absentee_data(subject, _parse_month(month))
 
 
 # ============================================================
@@ -1991,6 +2207,79 @@ def _build_summary_workbook(subject: str, start=None, end=None) -> BytesIO:
 def _safe_filename(subject: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9]+", "_", subject).strip("_").lower()
     return f"attendance_{cleaned or 'subject'}.xlsx"
+
+
+def _safe_month_filename(subject: str, month: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", subject).strip("_").lower()
+    return f"absentees_{cleaned or 'subject'}_{month}.xlsx"
+
+
+def _build_monthly_absentee_workbook(
+    subject: str,
+    month_start: Optional[date],
+) -> tuple[BytesIO, dict]:
+    data = _monthly_absentee_data(subject, month_start)
+
+    workbook = Workbook()
+    daily = workbook.active
+    daily.title = "Daily absentees"
+    daily.append(["Date", "Period", "S.No.", "Name"])
+
+    for session in data["sessions"]:
+        for person in session["absentees"]:
+            daily.append(
+                [
+                    session["date"],
+                    session["period"],
+                    int(person["sno"]),
+                    person["name"],
+                ]
+            )
+
+    summary = workbook.create_sheet("Monthly summary")
+    summary.append(["S.No.", "Name", "Sessions", "Present", "Absent"])
+
+    for row in data["totals"]:
+        summary.append(
+            [
+                int(row["sno"]),
+                row["name"],
+                row["sessions"],
+                row["present"],
+                row["absent"],
+            ]
+        )
+
+    output = BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output, data
+
+
+@app.get("/attendance/monthly-absentees/export")
+def export_monthly_absentees(
+    subject: str = Query(...),
+    month: Optional[str] = Query(None),
+    password: Optional[str] = Query(None),
+):
+    if subject not in SUBJECTS:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    _require_subject_password(subject, password)
+
+    output, data = _build_monthly_absentee_workbook(
+        subject, _parse_month(month)
+    )
+    filename = _safe_month_filename(subject, data["month"])
+
+    return StreamingResponse(
+        output,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/attendance/export")

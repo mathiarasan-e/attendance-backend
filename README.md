@@ -16,6 +16,9 @@ FastAPI + PostgreSQL service for the college attendance app.
   (`clear_student_password.py`).
 - **Per-student semester summary** (`Present`, `Absent`). The counts live in the
   app, on the subject's report page; there is no percentage column anywhere.
+- **Month-wise absentee database.** For a subject, staff can browse any month,
+  see the absentees for every session and per-student totals, and download that
+  month as an `.xlsx` workbook.
 - **Pluggable ERP delivery**: generate an Excel file and email it, or (later)
   push it to an ERP endpoint. The app's "Update to ERP" button is hidden until
   the college interface is agreed.
@@ -41,6 +44,8 @@ FastAPI + PostgreSQL service for the college attendance app.
 | GET | `/attendance/absentee-history` | Latest session's absentee list |
 | GET | `/attendance/sessions` | All sessions for a subject |
 | GET | `/attendance/summary` | Per-student semester summary (present/absent counts) |
+| GET | `/attendance/monthly-absentees` | Month-wise absentees (sessions + per-student totals) |
+| GET | `/attendance/monthly-absentees/export` | Download one month of absentees as `.xlsx` |
 | POST | `/attendance/close` | End a session now |
 | GET | `/attendance/history/{sno}` | One student's records |
 | POST | `/student/set-password` | First-time student setup |
